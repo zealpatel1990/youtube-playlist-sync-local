@@ -1,0 +1,30 @@
+{% comment %}
+Pipeline counts.
+
+Refetched on every SSE update, so this is the cost of *any* change in the
+system: it must never grow with the library. The view behind it runs two grouped
+aggregates and returns numbers, never rows (docs/CODE-AUDIT.md A2).
+{% endcomment %}
+{% load music_extras %}
+
+<div class="d-flex flex-wrap gap-2 align-items-center">
+    <span class="badge rounded-pill text-bg-light border">
+        <i class="bi bi-music-note-beamed"></i> {{ track_total }} track{{ track_total|pluralize }}
+    </span>
+
+    {% for item in state_counts %}
+        {% if item.count %}
+        <span class="badge rounded-pill text-bg-{{ item.value|state_colour }}">
+            <i class="bi {{ item.value|state_icon }}"></i> {{ item.label }}: {{ item.count }}
+        </span>
+        {% endif %}
+    {% endfor %}
+
+    {% if pending_moves %}
+    <a href="{% url 'library_review' %}"
+       class="badge rounded-pill text-bg-warning text-decoration-none">
+        <i class="bi bi-signpost-split"></i>
+        {{ pending_moves }} move{{ pending_moves|pluralize }} planned — review
+    </a>
+    {% endif %}
+</div>

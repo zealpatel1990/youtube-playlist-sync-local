@@ -10,5 +10,7 @@ db.sqlite3-*
 *.sqlite3-*
 staticfiles
 downloads
+staging
+.music_manager.lock
 *.log
 .env

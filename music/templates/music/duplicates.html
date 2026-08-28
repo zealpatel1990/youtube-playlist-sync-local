@@ -1,0 +1,103 @@
+{% extends "music/base.html" %}
+{% comment %}
+Duplicate groups.
+
+Nothing on this page deletes anything: `DUPLICATE_POLICY` decides what an
+organize run does with a group, and its default is report-only. The page exists
+so the operator can see what the policy would act on before changing it.
+
+The detector may not be built yet — the view renders an empty state rather than
+raising, because this page is linked from the navbar on every screen.
+{% endcomment %}
+{% load music_extras %}
+
+{% block title %}Duplicates · Music Library{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h4 mb-0">Duplicates</h1>
+    <span class="badge text-bg-light border">
+        policy: <strong>{{ policy }}</strong>
+    </span>
+</div>
+
+{% if error == "unavailable" %}
+<div class="card">
+    <div class="card-body text-center text-body-secondary py-5">
+        <i class="bi bi-tools fs-3 d-block mb-2"></i>
+        <p class="mb-1">Duplicate detection is not available in this build.</p>
+        <p class="small mb-0">
+            It arrives with <code>music.library.organizer</code>; nothing else on
+            the dashboard depends on it.
+        </p>
+    </div>
+</div>
+
+{% elif error == "failed" %}
+<div class="alert alert-danger" role="alert">
+    <i class="bi bi-exclamation-triangle"></i>
+    Duplicate detection failed. The traceback is in the service log
+    (<code>journalctl -u music_manager</code>).
+</div>
+
+{% elif not groups %}
+<div class="card">
+    <div class="card-body text-center text-body-secondary py-5">
+        <i class="bi bi-check2-circle fs-3 d-block mb-2"></i>
+        <p class="mb-0">No duplicates found.</p>
+        {% if unhashed %}
+        <p class="small mt-2 mb-0">
+            Still fingerprinting {{ unhashed }} file{{ unhashed|pluralize }} in the
+            background — byte-identical copies can only be spotted once that finishes.
+            Reload in a while.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+{% else %}
+{% if unhashed %}
+<p class="small text-body-secondary">
+    <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+    Fingerprinting {{ unhashed }} more file{{ unhashed|pluralize }}; more byte-identical
+    matches may appear as it completes.
+</p>
+{% endif %}
+<p class="small text-body-secondary">
+    {{ group_count }} group{{ group_count|pluralize }}. With
+    <code>report-only</code> these are listed and left alone.
+</p>
+
+{% for group in groups %}
+<div class="card mb-3">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2 py-2">
+        <span class="fw-semibold">
+            {{ group.tracks|length }} copies
+            {% if group.reason %}<span class="small fw-normal text-body-secondary">· {{ group.reason }}</span>{% endif %}
+        </span>
+        {% if group.key %}<code class="path-text text-body-tertiary">{{ group.key|truncatechars:24 }}</code>{% endif %}
+    </div>
+    <ul class="list-group list-group-flush">
+        {% for track in group.tracks %}
+        <li class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div class="flex-grow-1 min-width-0">
+                <div class="fw-semibold">
+                    {% if track.title %}{{ track.title }}{% else %}{{ track.path|basename }}{% endif %}
+                    {% if track.artist %}<span class="small fw-normal text-body-secondary">· {{ track.artist }}</span>{% endif %}
+                </div>
+                <div class="path-text text-body-tertiary" title="{{ track.path }}">{{ track.path }}</div>
+            </div>
+            <div class="text-nowrap small text-body-secondary">
+                {% if track.bitrate %}{{ track.bitrate }} kbps{% endif %}
+                {% if track.duration %}· {{ track.duration|hms }}{% endif %}
+                {% if track.size_bytes %}· {{ track.size_bytes|filesizeformat }}{% endif %}
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endfor %}
+{% endif %}
+
+{% endblock %}

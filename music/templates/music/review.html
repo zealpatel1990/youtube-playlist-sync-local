@@ -1,0 +1,162 @@
+{% extends "music/base.html" %}
+{% comment %}
+The organize manifest — the safety feature that makes organizing non-destructive.
+
+A plan writes `planned_path` and stops. Nothing moves until someone reads this
+page and presses Apply, and every applied move records `previous_path`, so each
+one can be reverted from the library afterwards.
+
+The layout puts source and destination on one line each and factors the library
+root out of both, so what is left on screen is exactly the part that changes.
+{% endcomment %}
+{% load music_extras %}
+
+{% block title %}Review moves · Music Library{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+    <div>
+        <h1 class="h4 mb-1">Planned moves</h1>
+        <p class="small text-body-secondary mb-0">
+            Nothing below has happened yet. Destinations are relative to
+            <code class="path-text">{{ library_root }}</code>.
+        </p>
+    </div>
+
+    {% if pending_moves %}
+    <div class="d-flex gap-2 align-items-center">
+        <span class="badge rounded-pill text-bg-warning align-self-center">
+            {{ pending_moves }} planned
+        </span>
+        <button type="button" class="btn btn-sm btn-primary"
+                hx-post="{% url 'action_apply' %}" hx-swap="none"
+                hx-confirm="Apply every planned move? Files will be moved on disk. Each move is recorded and can be reverted per track.">
+            <i class="bi bi-check2-square"></i> Apply all {{ pending_moves }}
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+{% if not moves %}
+<div class="card">
+    <div class="card-body text-center text-body-secondary py-5">
+        <i class="bi bi-check2-circle fs-3 d-block mb-2"></i>
+        <p class="mb-1">No moves are planned.</p>
+        <p class="small mb-3">
+            Every known track is either already in place or not identified well
+            enough to place yet.
+        </p>
+        <button type="button" class="btn btn-sm btn-outline-primary"
+                hx-post="{% url 'action_plan' %}" hx-swap="none">
+            <i class="bi bi-diagram-3"></i> Plan moves now
+        </button>
+    </div>
+</div>
+{% else %}
+
+<div class="card">
+    <ul class="list-group list-group-flush">
+        {% for move in moves %}
+        <li class="list-group-item py-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2">
+                <div class="fw-semibold">
+                    {% if move.track.title %}{{ move.track.title }}{% else %}{{ move.track.path|basename }}{% endif %}
+                    <span class="small fw-normal text-body-secondary">
+                        {% if move.track.artist %}· {{ move.track.artist }}{% endif %}
+                        {% if move.track.album %}· {{ move.track.album }}{% endif %}
+                        {% if move.track.duration %}· {{ move.track.duration|hms }}{% endif %}
+                    </span>
+                </div>
+                <div class="d-flex gap-1 align-items-center">
+                    {% if move.track.is_compilation %}
+                        <span class="badge text-bg-light border" title="Filed under Various Artists">compilation</span>
+                    {% endif %}
+                    {% if move.renames %}
+                        <span class="badge text-bg-light border">renamed</span>
+                    {% endif %}
+                    <span class="badge text-bg-{{ move.track.state|state_colour }}">
+                        {{ move.track.get_state_display }}
+                    </span>
+                    <button type="button" class="btn btn-sm btn-outline-success btn-icon"
+                            hx-post="{% url 'action_organize_track' move.track.id %}" hx-swap="none"
+                            hx-confirm="Move this one file now?"
+                            title="Move this file now" aria-label="Move this file now">
+                        <i class="bi bi-box-arrow-in-right"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="move-row">
+                <div>
+                    <div class="small text-body-secondary text-uppercase" style="font-size:.65rem;">From</div>
+                    <div class="path-text" title="{{ move.track.path }}">
+                        {% if move.source.outside_root %}
+                            <span class="text-body-tertiary">{{ move.source.directory }}/</span>
+                        {% else %}
+                            <span class="text-body-tertiary">&lt;library&gt;/{{ move.source.directory }}/</span>
+                        {% endif %}
+                        <span class="text-body-emphasis">{{ move.source.name }}</span>
+                    </div>
+                </div>
+
+                <div class="move-arrow text-center" aria-hidden="true">
+                    <i class="bi bi-arrow-right fs-5"></i>
+                </div>
+
+                <div>
+                    <div class="small text-body-secondary text-uppercase" style="font-size:.65rem;">To</div>
+                    <div class="path-text" title="{{ move.track.planned_path }}">
+                        {% if move.destination.outside_root %}
+                            <span class="text-warning-emphasis" title="outside the library root">
+                                {{ move.destination.directory }}/
+                            </span>
+                        {% else %}
+                            <span class="text-body-tertiary">&lt;library&gt;/</span><span class="text-success-emphasis">{{ move.destination.directory }}/</span>
+                        {% endif %}
+                        <span class="text-body-emphasis fw-semibold">{{ move.destination.name }}</span>
+                    </div>
+                </div>
+            </div>
+
+            {% if move.track.plan_note %}
+            <div class="small text-body-secondary mt-2">
+                <i class="bi bi-info-circle"></i> {{ move.track.plan_note }}
+            </div>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+
+    {% if is_paginated %}
+    <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span class="small text-body-secondary">
+            {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ page_obj.paginator.count }}
+        </span>
+        <nav aria-label="Manifest pages">
+            <ul class="pagination pagination-sm mb-0">
+                {% if page_obj.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=page_obj.previous_page_number %}">Prev</a>
+                    </li>
+                {% else %}
+                    <li class="page-item disabled"><span class="page-link">Prev</span></li>
+                {% endif %}
+                <li class="page-item active" aria-current="page">
+                    <span class="page-link">{{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
+                </li>
+                {% if page_obj.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=page_obj.next_page_number %}">Next</a>
+                    </li>
+                {% else %}
+                    <li class="page-item disabled"><span class="page-link">Next</span></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% endblock %}

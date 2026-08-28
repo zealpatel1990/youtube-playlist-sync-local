@@ -1,14 +1,33 @@
-argparse
+# Pinned where a surprise upgrade would break the service; ranged only for
+# yt-dlp, which must stay current to keep working against YouTube at all.
+#
+# Raspberry Pi 2 is 32-bit ARMv7. Wheels come from piwheels, not from the
+# aarch64 PyPI builds — check availability there before adding anything:
+#     pip install --index-url https://www.piwheels.org/simple ...
+
 django==5.2.16
-djangorestframework==3.16.1
-eyed3
-google-genai==1.32.0
 gunicorn==23.0.0
-mutagen
-python-dateutil==2.9.0
+whitenoise==6.12.0
 python-dotenv==1.2.2
-shazamio>=0.5.0
-tqdm
-unidecode
-whitenoise==6.12.0       # serve gzipped static files from the app (no nginx needed)
-yt-dlp>=2025.8.27
+
+# Media
+yt-dlp>=2025.8.27          # must float; YouTube changes constantly
+mutagen==1.47.0            # all tag IO (replaces eyed3: one save pass, more formats)
+
+# Identification
+shazamio>=0.5.0            # optional; disable with SHAZAM_ENABLED=0
+google-genai==1.32.0       # optional; last-resort metadata inference
+
+# AcoustID needs NO Python package. It is the fpcalc binary plus a plain HTTP
+# lookup over stdlib urllib, so there is nothing for pyacoustid to do here —
+# and skipping it avoids a compiled binding on a box where armv7 wheels are
+# scarce. Install the binary instead:
+#     sudo apt install libchromaprint-tools
+
+# Notes on what is NOT here:
+#   djangorestframework — the read-only JSON endpoints the old app exposed were
+#     unauthenticated and unused; plain views cover what the dashboard needs.
+#   eyed3 — replaced by mutagen.
+#   argparse — that PyPI package is a dead Python 2 backport; it has been in
+#     the standard library since 3.2 and installing it can shadow the stdlib.
+#   tqdm, python-dateutil, unidecode — no longer used.

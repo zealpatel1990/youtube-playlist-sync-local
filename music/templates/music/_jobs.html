@@ -1,0 +1,32 @@
+{% comment %}
+What the workers are doing, plus anything that gave up recently.
+
+Two bounded queries returning dictionaries, not model instances — this fragment
+is refetched on every change, so it never selects a column it does not show.
+The detail rides in a plain `title=`: a Bootstrap tooltip would need JS wiring
+re-run after every swap, and this is a status pill, not a control.
+{% endcomment %}
+
+{% if active_jobs %}
+    <span class="badge text-bg-info d-inline-flex align-items-center gap-1"
+          title="{% for job in active_jobs %}{{ job.kind }} ({{ job.state|lower }}){% if not forloop.last %}, {% endif %}{% endfor %}">
+        {% if running_count %}
+        <span class="spinner-border spinner-border-sm" style="width:.7rem;height:.7rem;"
+              role="status" aria-hidden="true"></span>
+        {% endif %}
+        {{ active_jobs|length }} job{{ active_jobs|length|pluralize }}
+        {% if running_count %}running{% else %}queued{% endif %}
+    </span>
+{% else %}
+    <span class="badge text-bg-light border text-body-secondary">
+        <i class="bi bi-pause-circle"></i> Idle
+    </span>
+{% endif %}
+
+{% if recent_failures %}
+    <span class="badge text-bg-danger"
+          title="{% for job in recent_failures %}{{ job.kind }}: {{ job.error|truncatechars:120 }}&#10;{% endfor %}">
+        <i class="bi bi-exclamation-triangle"></i>
+        {{ recent_failures|length }} recent failure{{ recent_failures|length|pluralize }}
+    </span>
+{% endif %}

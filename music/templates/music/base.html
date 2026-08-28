@@ -1,0 +1,123 @@
+{% load static %}<!doctype html>
+{% comment %} The theme is stamped on <html> before first paint by the inline script below,
+   so a dark-mode user never sees a white flash. Bootstrap 5.3 reads it. {% endcomment %}
+<html lang="en" data-bs-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>{% block title %}Music Library{% endblock %}</title>
+
+    {% comment %} Vendored, not CDN: the Pi is often on a LAN with no route out, and a
+       blocking stylesheet from a CDN would leave the dashboard unstyled. {% endcomment %}
+    <link href="{% static 'vendor/bootstrap/bootstrap.min.css' %}" rel="stylesheet">
+    <link href="{% static 'vendor/bootstrap-icons/bootstrap-icons.css' %}" rel="stylesheet">
+    <link href="{% static 'music/app.css' %}" rel="stylesheet">
+
+    <link rel="icon" type="image/svg+xml"
+          href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230d6efd'/><path d='M42 26v34a11 9 0 1 0 8 8.6V38l22-5v20a11 9 0 1 0 8 8.6V20z' fill='white'/></svg>">
+
+    <script>
+        // Runs before <body> exists: no flash of the wrong theme. Kept inline
+        // and tiny for exactly that reason.
+        (function () {
+            var stored = null;
+            try { stored = localStorage.getItem('mm-theme'); } catch (e) { /* private mode */ }
+            var dark = stored ? stored === 'dark'
+                : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+        })();
+    </script>
+
+    <script src="{% static 'vendor/htmx/htmx.min.js' %}" defer></script>
+    <script src="{% static 'vendor/htmx/sse.js' %}" defer></script>
+    <script src="{% static 'vendor/bootstrap/bootstrap.bundle.min.js' %}" defer></script>
+    <script src="{% static 'music/app.js' %}" defer></script>
+</head>
+
+{% comment %} Every htmx request carries the CSRF token from here, so no form needs a
+   hidden field and no view needs an exemption. {% endcomment %}
+<body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
+
+<nav class="navbar navbar-expand-md bg-body-tertiary border-bottom sticky-top">
+    <div class="container-xxl">
+        <a class="navbar-brand d-flex align-items-center gap-2 fw-semibold" href="{% url 'dashboard' %}">
+            <i class="bi bi-music-note-list text-primary"></i>
+            <span>Music Library</span>
+        </a>
+
+        <button class="navbar-toggler border-0" type="button" data-bs-toggle="collapse"
+                data-bs-target="#nav-menu" aria-controls="nav-menu" aria-expanded="false"
+                aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+
+        <div class="collapse navbar-collapse" id="nav-menu">
+            <ul class="navbar-nav me-auto mb-2 mb-md-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if nav == 'library' %}active fw-semibold{% endif %}"
+                       href="{% url 'dashboard' %}">Library</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if nav == 'review' %}active fw-semibold{% endif %}"
+                       href="{% url 'library_review' %}">Review moves</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if nav == 'duplicates' %}active fw-semibold{% endif %}"
+                       href="{% url 'duplicates' %}">Duplicates</a>
+                </li>
+            </ul>
+
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="d-inline-flex align-items-center gap-2 small text-body-secondary me-1"
+                      title="Live-updates connection">
+                    <span id="sse-dot" class="sse-dot" aria-hidden="true"></span>
+                    <span id="sse-label">Connecting…</span>
+                </span>
+
+                <button type="button" id="theme-toggle" class="btn btn-sm btn-outline-secondary"
+                        title="Toggle light / dark" aria-label="Toggle light or dark theme">
+                    <i class="bi bi-circle-half"></i>
+                </button>
+
+                {% comment %} The panel body is fetched fresh each time the modal opens, so it
+                   always reflects what is actually on disk in .env. {% endcomment %}
+                <button type="button" class="btn btn-sm btn-outline-secondary d-inline-flex align-items-center gap-1"
+                        data-bs-toggle="modal" data-bs-target="#settingsModal"
+                        hx-get="{% url 'settings_form' %}" hx-target="#settings-modal-body"
+                        hx-trigger="click">
+                    <i class="bi bi-gear"></i> Settings
+                </button>
+            </div>
+        </div>
+    </div>
+</nav>
+
+{% comment %} The one SSE connection for the page. Everything that refetches on a change is
+   a descendant of this element and triggers on `sse:update`. {% endcomment %}
+<main class="container-xxl py-3" hx-ext="sse" sse-connect="{% url 'stream_events' %}">
+    {% block content %}{% endblock %}
+</main>
+
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title d-flex align-items-center gap-2" id="settingsModalLabel">
+                    <i class="bi bi-gear-fill"></i> Settings
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="settings-modal-body">
+                <div class="text-center text-body-secondary py-4">
+                    <span class="spinner-border spinner-border-sm"></span> Loading…
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+</body>
+</html>

@@ -1,0 +1,90 @@
+{% extends "music/base.html" %}
+{% comment %}
+The library page. Everything live on it sits inside base.html's single SSE
+wrapper and refetches its own fragment on `sse:update` — three small GETs when
+something actually changes, and nothing at all in between.
+{% endcomment %}
+
+{% block title %}Library · Music Library{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <h1 class="h4 mb-0">Library</h1>
+        <span class="badge text-bg-secondary rounded-pill">{{ page_obj.paginator.count }}</span>
+        {# Jobs fragment: swapped whole, so it can go from "Idle" to a list. #}
+        <span id="jobs-panel" hx-get="{% url 'fragment_jobs' %}"
+              hx-trigger="sse:update" hx-swap="innerHTML">
+            {% include "music/_jobs.html" %}
+        </span>
+    </div>
+
+    <form method="get" action="{% url 'dashboard' %}" class="d-flex gap-2" role="search">
+        {# Sort survives a search; page does not, or you land on an empty page. #}
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <div class="input-group input-group-sm" style="min-width: 16rem;">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input type="search" class="form-control" name="q" value="{{ q }}"
+                   placeholder="Title, artist or album" aria-label="Search the library">
+            <button class="btn btn-outline-secondary" type="submit">Search</button>
+        </div>
+    </form>
+</div>
+
+{# Counts. Aggregate queries only — never a row dump (audit A2). #}
+<div id="stats-panel" hx-get="{% url 'fragment_stats' %}"
+     hx-trigger="sse:update" hx-swap="innerHTML" class="mb-3">
+    {% include "music/_stats.html" %}
+</div>
+
+<div class="card mb-3">
+    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center">
+        <span class="small text-body-secondary me-1 d-none d-md-inline">Actions</span>
+
+        <button type="button" class="btn btn-sm btn-outline-primary"
+                hx-post="{% url 'action_scan' %}" hx-swap="none">
+            <i class="bi bi-folder-symlink"></i> Scan disks
+        </button>
+
+        <button type="button" class="btn btn-sm btn-outline-primary"
+                hx-post="{% url 'action_sync_youtube' %}" hx-swap="none">
+            <i class="bi bi-youtube"></i> Sync playlist
+        </button>
+
+        <span class="vr d-none d-md-inline"></span>
+
+        <button type="button" class="btn btn-sm btn-outline-primary"
+                hx-post="{% url 'action_plan' %}" hx-swap="none">
+            <i class="bi bi-diagram-3"></i> Plan moves
+        </button>
+
+        <a href="{% url 'library_review' %}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-list-check"></i> Review
+        </a>
+
+        {# Moves files on the user's disk: never one click away from a stray tap. #}
+        <button type="button" class="btn btn-sm btn-primary"
+                hx-post="{% url 'action_apply' %}" hx-swap="none"
+                hx-confirm="Apply every planned move? Files will be moved on disk. Each move is recorded and can be reverted per track.">
+            <i class="bi bi-check2-square"></i> Apply moves
+        </button>
+
+        <div class="ms-auto">
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                    hx-post="{% url 'action_update_ytdlp' %}" hx-swap="none"
+                    hx-confirm="Upgrade yt-dlp and restart the service? The dashboard will be briefly unavailable.">
+                <i class="bi bi-arrow-up-circle"></i> Update yt-dlp
+            </button>
+        </div>
+    </div>
+</div>
+
+{% comment %} The table refetches itself, headers and pagination included, so a change of
+   state re-sorts correctly without a full page load. {% endcomment %}
+<div id="tracks-panel" hx-get="{% url 'fragment_tracks' %}{% querystring %}"
+     hx-trigger="sse:update" hx-swap="innerHTML">
+    {% include "music/_tracks.html" %}
+</div>
+
+{% endblock %}

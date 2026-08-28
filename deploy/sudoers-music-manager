@@ -1,4 +1,17 @@
 # Lets the "Update yt-dlp" button restart the service without a password prompt.
+#
 # Install with:  sudo visudo -f /etc/sudoers.d/music-manager
-# (adjust the user "pi" and service name if you changed them)
-pi ALL=(root) NOPASSWD: /bin/systemctl restart music_manager
+# (adjust the user "pi" and the service name if you changed them)
+#
+# sudoers matches the command line LITERALLY, including arguments. The app runs
+#     systemctl restart --no-block music_manager
+# so `--no-block` must appear here too — a rule without it silently refuses the
+# restart, and the old fire-and-forget code could not even tell (it never
+# checked the subprocess result; see docs/CODE-AUDIT.md A7). The current code
+# uses `sudo -n` with check=True, so a mismatch here surfaces as a failed job
+# with a readable message rather than a silent no-op.
+#
+# Both paths are listed because /bin is a symlink to /usr/bin on Raspberry Pi
+# OS, and which one sudo sees depends on how systemctl was resolved.
+
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block music_manager, /bin/systemctl restart --no-block music_manager

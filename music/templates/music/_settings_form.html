@@ -1,0 +1,123 @@
+{% comment %}
+The `.env` editor, loaded into the settings modal by htmx.
+
+Two things worth knowing before editing this file:
+
+* Validation is per field and enforced server-side (`views.EnvField.clean`); the
+  `min`/`step` attributes below only tell the browser the same story. The
+  previous form validated everything with one `float()`, which let
+  `SSE_POLL_SECONDS=0` through and turned every open stream into a spin loop
+  after the next restart (docs/CODE-AUDIT.md A9).
+* On a validation error the server re-renders this same partial with the bad
+  fields marked, and htmx swaps it back into the modal body. A successful save
+  answers 204, which htmx never swaps.
+{% endcomment %}
+
+<form hx-post="{% url 'update_settings' %}"
+      hx-target="#settings-modal-body" hx-swap="innerHTML"
+      autocomplete="off">
+
+    {% if has_errors %}
+    <div class="alert alert-danger py-2 small" role="alert">
+        <i class="bi bi-exclamation-triangle"></i>
+        Nothing was saved. Fix the fields marked below and submit again.
+    </div>
+    {% endif %}
+
+    <p class="small text-body-secondary">
+        <i class="bi bi-info-circle"></i>
+        Written to <code class="path-text">{{ env_path }}</code>. Changes take
+        effect when the service restarts. Paths to executables and the Django
+        keys are deliberately not editable here.
+    </p>
+
+    {% for section in sections %}
+    <fieldset class="mb-3">
+        <legend class="h6 text-uppercase text-body-secondary border-bottom pb-1"
+                style="font-size:.72rem; letter-spacing:.05em;">{{ section.title }}</legend>
+
+        <div class="row g-3">
+            {% for row in section.rows %}
+            <div class="col-12 col-md-6">
+                <label for="env-{{ row.field.key }}" class="form-label small fw-semibold mb-1">
+                    {{ row.field.label }}
+                    {% if row.field.bounds_hint %}
+                        <span class="text-body-tertiary fw-normal">({{ row.field.bounds_hint }})</span>
+                    {% endif %}
+                </label>
+
+                {% if row.field.kind == "bool" %}
+                    <select id="env-{{ row.field.key }}" name="{{ row.field.key }}"
+                            class="form-select form-select-sm {% if row.error %}is-invalid{% endif %}">
+                        <option value="1" {% if row.value == "1" %}selected{% endif %}>On</option>
+                        <option value="0" {% if row.value != "1" %}selected{% endif %}>Off</option>
+                    </select>
+                {% elif row.field.kind == "choice" %}
+                    <select id="env-{{ row.field.key }}" name="{{ row.field.key }}"
+                            class="form-select form-select-sm {% if row.error %}is-invalid{% endif %}">
+                        {% for choice in row.field.choices %}
+                        <option value="{{ choice }}" {% if row.value == choice %}selected{% endif %}>{{ choice }}</option>
+                        {% endfor %}
+                    </select>
+                {% else %}
+                    <input type="{{ row.field.input_type }}"
+                           id="env-{{ row.field.key }}" name="{{ row.field.key }}"
+                           value="{{ row.value }}"
+                           class="form-control form-control-sm {% if row.error %}is-invalid{% endif %}"
+                           {% if row.field.is_numeric %}
+                               step="{{ row.field.step }}"
+                               {% if row.field.minimum is not None %}min="{{ row.field.minimum }}"{% endif %}
+                               {% if row.field.maximum is not None %}max="{{ row.field.maximum }}"{% endif %}
+                           {% endif %}>
+                {% endif %}
+
+                {% if row.error %}
+                    <div class="invalid-feedback d-block small">
+                        {{ row.field.label }} {{ row.error }}.
+                    </div>
+                {% elif row.field.help %}
+                    <div class="form-text small">{{ row.field.help }}</div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endfor %}
+
+    <fieldset class="mb-3">
+        <legend class="h6 text-uppercase text-body-secondary border-bottom pb-1"
+                style="font-size:.72rem; letter-spacing:.05em;">API keys</legend>
+        <p class="small text-body-secondary">
+            {% comment %} Write-only: a stored key is never rendered back to the browser, not
+               even masked — the length of a mask is itself information. {% endcomment %}
+            Stored keys are never shown. Leave a field blank to keep the key
+            that is already saved.
+        </p>
+
+        <div class="row g-3">
+            {% for secret in secrets %}
+            <div class="col-12 col-md-6">
+                <label for="env-{{ secret.field.key }}" class="form-label small fw-semibold mb-1">
+                    {{ secret.field.label }}
+                    {% if secret.is_set %}
+                        <span class="badge text-bg-success ms-1">set</span>
+                    {% else %}
+                        <span class="badge text-bg-secondary ms-1">not set</span>
+                    {% endif %}
+                </label>
+                <input type="password" id="env-{{ secret.field.key }}" name="{{ secret.field.key }}"
+                       value="" autocomplete="new-password" class="form-control form-control-sm"
+                       placeholder="{% if secret.is_set %}leave blank to keep the saved key{% else %}not set{% endif %}">
+                <div class="form-text small">{{ secret.field.help }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+
+    <div class="d-flex justify-content-end gap-2 pt-1">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-sm btn-primary">
+            <i class="bi bi-save"></i> Save
+        </button>
+    </div>
+</form>

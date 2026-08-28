@@ -1,39 +1,54 @@
-# Simulate a 64-bit Raspberry Pi (Raspberry Pi OS is Debian/aarch64) to test the app
-# end-to-end on the same CPU architecture it will actually be deployed on.
+# Test image that matches the REAL deployment target.
 #
-#   docker buildx build --platform linux/arm64 -t ytsync-pi --load .
-#   docker run --rm --platform linux/arm64 ytsync-pi                      # offline test suite
-#   docker run --rm --platform linux/arm64 -e RUN_LIVE=1 \
-#       -e PLAYLIST_URL='<real playlist url>' ytsync-pi \
-#       python manage.py test playlist.tests.test_live -v2               # live smoke test
+# The previous Dockerfile built for linux/arm64. A Raspberry Pi 2 (BCM2836,
+# Cortex-A7) is 32-bit ARMv7, which is a genuinely different platform: wheels
+# come from piwheels rather than the aarch64 PyPI builds, and packages with
+# native extensions (shazamio's dependencies especially) may have no armv7
+# wheel at all and fall back to compiling — for hours, on a 900MHz core. An
+# arm64 image cannot surface any of that.
 #
-# python:3.12-slim is Debian-based (bookworm), matching Raspberry Pi OS's userland.
-FROM python:3.12-slim
+# Build (needs binfmt/qemu registered once via tonistiigi/binfmt):
+#   docker buildx build --platform linux/arm/v7 -t music-manager:pi --load .
+#   docker run --rm --platform linux/arm/v7 music-manager:pi
+#
+# Emulated ARMv7 is slow. This image is for catching install and import
+# failures, not for benchmarking.
 
-# ffmpeg: required by yt-dlp's FFmpegExtractAudio postprocessor (audio -> mp3).
-# curl + build-essential: only used if a dependency has no aarch64 wheel and must compile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM --platform=linux/arm/v7 python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ffmpeg   — yt-dlp's audio extraction
+# libchromaprint-tools — provides fpcalc, which AcoustID identification needs
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
         ffmpeg \
-        curl \
-        build-essential \
+        libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# piwheels serves prebuilt ARM wheels; without it every native package compiles.
+RUN printf '[global]\nextra-index-url = https://www.piwheels.org/simple\n' \
+    > /etc/pip.conf
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 
-# settings.py reads these at import time; provide test-safe defaults (override at runtime).
-ENV DJANGO_SETTINGS_MODULE=music_manager.settings \
-    PLAYLIST_URL=https://www.youtube.com/playlist?list=PLACEHOLDER \
-    GEMINI_API_KEY=dummy-key-for-tests \
-    OUTPUT_DIRECTORY=/tmp/downloads \
-    YTDLP_PATH=yt-dlp \
-    PIP_PATH=pip \
-    PROJECT_BASE_DIR=/app \
-    PYTHONUNBUFFERED=1
+# Dummy values so settings import succeeds; the suite never uses them.
+ENV DJANGO_SECRET_KEY=test-only-not-a-real-secret \
+    DJANGO_DEBUG=0 \
+    LIBRARY_ROOT=/tmp/library \
+    SCAN_ROOTS=/tmp/scan \
+    DOWNLOAD_STAGING=/tmp/staging \
+    DATABASE_PATH=/tmp/test.sqlite3 \
+    MUSIC_MANAGER_DISABLE_WORKERS=1
 
-# Default: the deterministic, offline feature suite (external services mocked).
-CMD ["python", "manage.py", "test", "playlist", "-v", "2"]
+# Scoped to the app: a bare `manage.py test` would discover stray test*.py
+# files at the repo root (docs/CODE-AUDIT.md A10).
+CMD ["python", "manage.py", "test", "music", "-v", "2"]

@@ -1,8 +1,13 @@
-from django.urls import path, include
+"""
+Root URL configuration.
+
+The previous project included the same urlconf twice — once at `''` and once
+under `'api/'` — so every route existed at two paths and `reverse()` silently
+resolved to the `api/`-prefixed copy. Included exactly once here.
+"""
+
+from django.urls import include, path
 
 urlpatterns = [
-    # The API will be at /api/videos, etc.
-    path('api/', include('playlist.urls')),
-    # The UI dashboard will be at the root URL '/'
-    path('', include('playlist.urls')),
+    path("", include("music.urls")),
 ]

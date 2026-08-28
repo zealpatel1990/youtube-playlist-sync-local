@@ -1,95 +1,116 @@
-# YouTube Playlist Sync
+# Music Manager
 
-A lightweight Django app (built to run on a Raspberry Pi) that mirrors a YouTube
-playlist locally: it tracks each video, downloads audio with **yt-dlp**, and tags
-it with **Shazam** (Gemini fallback).
+A small Django app for a Raspberry Pi that keeps a music library in order.
 
-## How it works (architecture)
+It does two things, through one pipeline:
 
-Slow work never runs inside an HTTP request. A view only *enqueues* a job and
-returns instantly. A small pool of **worker threads inside the same process**
-drains the queue (downloads/tagging), and the browser gets live updates over
-**SSE** — no second process, no Redis, no Channels.
+1. **Mirrors a YouTube playlist** — tracks each video, downloads the audio with yt-dlp.
+2. **Organizes your existing music** — scans the folders you already have and files everything into the layout a Plex music library expects.
+
+Both paths converge on the same object — an audio file on disk — so identification, tagging and organization are written once and serve both.
 
 ```
-Browser ──POST /actions/… (htmx)──►  gunicorn ──creates──► Job (QUEUED)   [returns 204 instantly]
-                                        │  └─ worker threads ──claim──► download / tag / resync
-Browser ◄──── SSE /events/ ────────────┘     (they update DB rows)
-        (on "update", htmx re-fetches the rows / pills / job fragments)
+YouTube playlist ──download──┐
+                             ├──► Track ──► identify ──► tag ──► organize
+Existing folders ──────scan──┘
 ```
 
-- **No stuck POSTs** — every action returns immediately (HTTP 204 + a toast).
-- **Live updates** — the dashboard opens one `/events/` stream; when the data
-  changes the server sends a bare `update` and htmx re-fetches the changed
-  fragments. New videos appear on their own.
-- **Fast page load** — Bootstrap/icons/htmx are self-hosted (no CDN) and served
-  gzipped by WhiteNoise; the yt-dlp version badge lazy-loads after paint.
-- **SQLite in WAL mode** — lets the request threads and worker threads share
-  `db.sqlite3` safely; job claiming is atomic (already configured in `settings.py`).
+## What "organized" means
 
-Key pieces:
+Files are laid out the way [Plex documents](https://support.plex.tv/articles/200265296-adding-music-media-from-folders/):
 
-| File | Role |
-|------|------|
-| `playlist/models.py` → `Job` | the background task queue |
-| `playlist/services/job_service.py` | `enqueue()` — called by views |
-| `playlist/services/job_runner.py` | executes a job (reuses the download/tag/youtube services) |
-| `playlist/services/worker.py` | the inline worker thread pool (started from `wsgi.py`) |
-| `playlist/views.py` → `stream_status` | the SSE change-signal endpoint |
-| `playlist/templates/playlist/_rows.html`, `_status_pills.html`, `_job_status.html` | fragments re-fetched on update |
+```
+Music/
+  Radiohead/
+    OK Computer/
+      01 - Airbag.mp3
+      02 - Paranoid Android.mp3
+  Various Artists/
+    Now That's What I Call Music 42/
+      01 - Some Song.mp3
+```
+
+Multi-disc albums prepend the disc number to the track number, so disc 3 track 2 becomes `302 - Track Name.mp3`. Compilations go under `Various Artists` with the real performer kept in each track's `artist` tag. The tags themselves are corrected too, because Plex reads tags over filenames.
+
+**Nothing moves until you say so.** A scan computes a plan; you review the whole manifest at `/review/`; applying it is a separate, explicit action that records where every file came from, so it can be reverted. No file is ever deleted.
+
+## How tracks get identified
+
+Cheapest source first, so the expensive and rate-limited ones only see what the cheap ones could not resolve:
+
+| Order | Source | Notes |
+|---|---|---|
+| 1 | Existing tags | Free. Most of a well-kept library stops here. |
+| 2 | **AcoustID** | Free API key. Fingerprints audio with `fpcalc`, resolves via MusicBrainz. Does the bulk of the work, and is the only source that returns track and disc numbers — which the Plex layout needs. |
+| 3 | Shazam | For rips, remixes and YouTube-only audio that AcoustID cannot match. |
+| 4 | Gemini | Last resort, inference from the title. Rate-limited *and* capped by a hard daily budget, because the free tier's quota is small. |
+
+Each provider can be switched off. The chain is `IDENTIFY_CHAIN` in `.env`.
+
+## Why it stays quiet on a Pi
+
+The app is designed around what it costs when nothing is happening, because that is most of the time:
+
+- **Workers block on an event, not on the database.** Enqueuing work wakes them instantly; an idle system runs no queries at all.
+- **The dashboard's live updates compare an in-memory counter**, not the database. An idle dashboard costs nothing per tick no matter how many tabs are open, and one change wakes them all at once.
+- Hashing reads in 1 MiB blocks, tags are written in a single pass, and a rescan of unchanged files does no IO beyond `stat`.
+
+Everything runs in **one process** — no Redis, no Celery, no second service. That is enforced at startup with a lock file rather than left to a comment.
 
 ## Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then edit PLAYLIST_URL + GEMINI_API_KEY (required)
+
+cp .env.example .env
+# At minimum set DJANGO_SECRET_KEY and LIBRARY_ROOT.
+# Generate a key:  python -c "import secrets; print(secrets.token_urlsafe(50))"
+
 python manage.py migrate
 python manage.py collectstatic --noinput
 ```
 
+For AcoustID identification you also need the fingerprinting binary and a free key from [acoustid.org](https://acoustid.org/new-application):
+
+```bash
+sudo apt install libchromaprint-tools ffmpeg   # provides fpcalc and ffmpeg
+```
+
 ## Run
 
-**One** process — the workers run inside it.
-
 **Development**
+
 ```bash
-python manage.py runserver 0.0.0.0:8000   # threaded: serves SSE and runs the job workers
+python manage.py runserver 0.0.0.0:8000
 ```
 
 **Production (Raspberry Pi, systemd)**
+
 ```bash
 sudo cp deploy/music_manager.service /etc/systemd/system/
-sudo visudo -f /etc/sudoers.d/music-manager   # paste deploy/sudoers-music-manager (for the Update button)
+sudo visudo -f /etc/sudoers.d/music-manager   # paste deploy/sudoers-music-manager
 sudo systemctl daemon-reload
 sudo systemctl enable --now music_manager
 ```
-gunicorn runs with the threaded worker (`-k gthread`). **Keep `--workers 1`** and
-scale job concurrency with `WORKER_THREADS` in `.env` — the job threads live in
-the web process, so extra gunicorn workers would each start their own pool.
-Don't use `--preload` (threads don't survive gunicorn's fork).
 
-> Note: `settings.py` ships with `DEBUG = True`. For a faster/safer production
-> run, set it to `False` (WhiteNoise then serves the pre-compressed assets).
+Keep `--workers 1`. Background concurrency is `WORKER_THREADS` in `.env`; on a Pi 2, leave it at 1 or 2, since one ffmpeg transcode already saturates a core. Never add `--preload` — worker threads do not survive gunicorn's fork.
 
-## CLI / batch commands
+## Command line
 
 ```bash
-python manage.py sync_playlist     # fetch playlist + download/tag everything new
-python manage.py process_tagging   # tag any DOWNLOADED/TAGGING tracks
+python manage.py scan_library                 # find audio files
+python manage.py organize                     # dry run: print the planned moves
+python manage.py organize --apply             # perform them
+python manage.py sync_youtube                 # refresh the playlist, queue downloads
+python manage.py identify_track --path FILE   # identify one file, print the result
+python manage.py migrate_legacy --apply       # import rows from the previous version
 ```
 
-## Fetch and store playlist videos from a shell
+## Tests
 
 ```bash
-python manage.py shell
+python manage.py test music
 ```
-```python
-from django.conf import settings
-from playlist.services.youtube_service import YoutubeService
-from playlist.models import Video
 
-service = YoutubeService(playlist_url=settings.PLAYLIST_URL)
-service.fetch_playlist_videos()
-print(f"{Video.objects.count()} videos in the database.")
-```
+Always scope to `music`. A bare `manage.py test` discovers stray `test*.py` files at the repo root.

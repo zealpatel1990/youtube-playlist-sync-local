@@ -1,37 +1,65 @@
 [Unit]
-Description=Gunicorn instance to serve music_manager
-After=network.target
-# --- NEW: PREVENTION OF RESTART LOOPS ---
-# If the service restarts 5 times within 60 seconds, stop trying.
+Description=Music Manager (YouTube sync + Plex library organizer)
+Documentation=https://github.com/zpatel-dev/youtube-playlist-sync-local
+After=network-online.target
+Wants=network-online.target
+
+# The library lives on the USB disk. Without this, a boot where the disk has
+# not mounted yet would either fail every download or — worse — silently write
+# into a directory created on the SD card, filling it.
+RequiresMountsFor=/media/pi/500gb hdd
+
 StartLimitIntervalSec=100
 StartLimitBurst=5
 
 [Service]
-# Run as the pi user so you don't have permission issues with files on Desktop
+Type=simple
 User=pi
 Group=pi
-
-# The folder where your manage.py lives
 WorkingDirectory=/home/pi/Desktop/py_music_manager
 
-# Set the path environment variable to ensure we use the .venv
+# THIS LINE IS LOAD-BEARING. Settings read configuration from the environment,
+# so without it gunicorn fails during app import and systemd crash-loops the
+# unit until the start limit halts it permanently. The previous version of this
+# file was missing it (docs/CODE-AUDIT.md A1) and could not boot from a clean
+# checkout.
+EnvironmentFile=/home/pi/Desktop/py_music_manager/.env
+
 Environment="PATH=/home/pi/Desktop/py_music_manager/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
 
-# env variables you want to overwrite
-Environment='ENVNAME="value"'
-
-
-# The command to start the server
-# Note: We use the absolute path to gunicorn inside your .venv
+# --workers 1 is REQUIRED, not a preference. The job queue's wakeup event, the
+# SSE revision counter and the per-track locks are all in-process; a second
+# worker would run duplicate downloads and steal jobs from its sibling. Scale
+# background work with WORKER_THREADS in .env instead.
+#
+# --threads is generous because each open dashboard tab holds one thread for
+# its SSE stream. Sleeping threads are cheap (they block on a condition
+# variable and issue no queries); running out of them is not (A2).
+#
+# Never add --preload: worker threads do not survive gunicorn's fork.
 ExecStart=/home/pi/Desktop/py_music_manager/.venv/bin/gunicorn \
-          --workers 1 \
-          --threads 4 \
-          --bind 0.0.0.0:8000 \
-          music_manager.wsgi:application
+    --workers 1 \
+    --threads 16 \
+    --worker-class gthread \
+    --timeout 120 \
+    --graceful-timeout 30 \
+    --bind 0.0.0.0:8000 \
+    --access-logfile - \
+    --error-logfile - \
+    music_manager.wsgi:application
 
-# Automatically restart the service if it crashes
 Restart=always
 RestartSec=3
+
+# Give in-flight downloads a chance to finish cleanly on restart.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# Modest hardening. The service needs to write the library and the database,
+# and needs sudo for the self-restart, so this is deliberately not a lockdown.
+NoNewPrivileges=no
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

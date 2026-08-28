@@ -1,0 +1,84 @@
+{% comment %}
+One library row.
+
+Every field touched here must appear in `views.TRACK_LIST_FIELDS`; the queryset
+is deferred with `.only()`, so reading a column that is not in that list costs
+one extra query *per row* — the difference between one query and fifty on a page.
+
+Under 768px `app.css` turns each row into a card and promotes `data-label` to
+the field heading, which is why every cell carries one.
+{% endcomment %}
+{% load music_extras %}
+
+<tr>
+    <td class="cell-title">
+        <div class="fw-semibold clamp-2">
+            {% if track.title %}{{ track.title }}{% else %}{{ track.path|basename }}{% endif %}
+        </div>
+        <div class="small text-body-secondary text-truncate">
+            {% if track.artist %}{{ track.artist }}{% endif %}
+            {% if track.album %}<span class="text-body-tertiary">·</span> {{ track.album }}{% endif %}
+            {% if not track.artist and not track.album %}<span class="fst-italic">no metadata yet</span>{% endif %}
+        </div>
+        <div class="path-text text-body-tertiary text-truncate" title="{{ track.path }}">{{ track.path }}</div>
+        {% if track.state == "FAILED" and track.last_error %}
+            <div class="small text-danger text-truncate" title="{{ track.last_error }}">
+                <i class="bi bi-exclamation-circle"></i>
+                attempt {{ track.fail_count }} · {{ track.last_error }}
+            </div>
+        {% endif %}
+    </td>
+
+    <td data-label="State">
+        <span class="badge text-bg-{{ track.state|state_colour }}">
+            <i class="bi {{ track.state|state_icon }}"></i> {{ track.get_state_display }}
+        </span>
+        {% if track.identified_by %}
+            <div class="small text-body-secondary">
+                {{ track.identified_by }}{% if track.confidence %} · {{ track.confidence|percent }}{% endif %}
+            </div>
+        {% endif %}
+        {% if track.needs_move %}
+            <div class="small text-warning-emphasis" title="{{ track.planned_path }}">
+                <i class="bi bi-signpost-split"></i> move planned
+            </div>
+        {% endif %}
+    </td>
+
+    <td data-label="Length" class="text-nowrap">
+        {{ track.duration|hms|default:"—" }}
+        {% if track.bitrate %}<div class="small text-body-secondary">{{ track.bitrate }} kbps</div>{% endif %}
+    </td>
+
+    <td data-label="Added" class="text-nowrap small text-body-secondary">
+        {{ track.updated_at|date:"M j, H:i" }}
+    </td>
+
+    <td class="text-end cell-actions">
+        <div class="d-inline-flex gap-1">
+            <button type="button" class="btn btn-sm btn-outline-primary btn-icon"
+                    hx-post="{% url 'action_identify_track' track.id %}" hx-swap="none"
+                    title="Identify this track" aria-label="Identify this track">
+                <i class="bi bi-search"></i>
+            </button>
+
+            {% if track.needs_move %}
+            <button type="button" class="btn btn-sm btn-outline-success btn-icon"
+                    hx-post="{% url 'action_organize_track' track.id %}" hx-swap="none"
+                    hx-confirm="Move this file to its planned location?"
+                    title="Move to the planned location" aria-label="Move to the planned location">
+                <i class="bi bi-box-arrow-in-right"></i>
+            </button>
+            {% endif %}
+
+            {% if track.previous_path %}
+            <button type="button" class="btn btn-sm btn-outline-warning btn-icon"
+                    hx-post="{% url 'action_revert_track' track.id %}" hx-swap="none"
+                    hx-confirm="Move this file back to where it was before the last organize?"
+                    title="Undo the last move" aria-label="Undo the last move">
+                <i class="bi bi-arrow-counterclockwise"></i>
+            </button>
+            {% endif %}
+        </div>
+    </td>
+</tr>

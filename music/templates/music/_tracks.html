@@ -1,0 +1,86 @@
+{% comment %}
+The track table, headers and pagination included, so the whole thing can be
+swapped as one unit when the SSE stream reports a change.
+
+Pagination and sort links are query-only hrefs (`?page=2`). The browser resolves
+them against whatever page the fragment is displayed in, so the same markup
+works when this is rendered into the dashboard and when it is fetched directly.
+{% endcomment %}
+{% load music_extras %}
+
+<div class="card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 track-table">
+            <thead>
+                <tr>
+                    {% for column in sort_columns %}
+                    <th scope="col" {% if column.key == "title" %}style="width:45%"{% endif %}>
+                        <a href="{% querystring sort=column.next page=None %}">
+                            {{ column.label }}
+                            {% if column.arrow %}<i class="bi {{ column.arrow }}"></i>{% endif %}
+                        </a>
+                    </th>
+                    {% endfor %}
+                    <th scope="col" class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for track in tracks %}
+                    {% include "music/_track_row.html" %}
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center text-body-secondary py-5 cell-empty">
+                        {% if q %}
+                            No track matches <strong>{{ q }}</strong>.
+                            <a href="{% querystring q=None page=None %}">Clear the search</a>.
+                        {% else %}
+                            <i class="bi bi-inbox fs-4 d-block mb-2"></i>
+                            Nothing in the library yet — run <strong>Scan disks</strong>
+                            or <strong>Sync playlist</strong> to fill it.
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if is_paginated %}
+    <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span class="small text-body-secondary">
+            {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ page_obj.paginator.count }}
+        </span>
+        <nav aria-label="Library pages">
+            <ul class="pagination pagination-sm mb-0">
+                {% if page_obj.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=1 %}" aria-label="First">&laquo;</a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=page_obj.previous_page_number %}">Prev</a>
+                    </li>
+                {% else %}
+                    <li class="page-item disabled"><span class="page-link">&laquo;</span></li>
+                    <li class="page-item disabled"><span class="page-link">Prev</span></li>
+                {% endif %}
+
+                <li class="page-item active" aria-current="page">
+                    <span class="page-link">{{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
+                </li>
+
+                {% if page_obj.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=page_obj.next_page_number %}">Next</a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="{% querystring page=page_obj.paginator.num_pages %}" aria-label="Last">&raquo;</a>
+                    </li>
+                {% else %}
+                    <li class="page-item disabled"><span class="page-link">Next</span></li>
+                    <li class="page-item disabled"><span class="page-link">&raquo;</span></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
+</div>

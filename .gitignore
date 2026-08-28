@@ -21,3 +21,11 @@ staticfiles/
 # Runtime logs (server + workers)
 django.log
 worker.log
+
+# Single-process guard held by the running service
+.music_manager.lock
+
+# Downloads waiting to be identified and organized
+staging/
+# Local dev sandbox (library/incoming/staging used by .env)
+_devdata/

@@ -1,0 +1,890 @@
+"""
+Identification chain and providers, with every external boundary mocked.
+
+Nothing here touches the network, spawns a subprocess, or needs a media file.
+That is not only for speed: `test_tagger.py` in the previous version ran a live
+Shazam pass, real ORM writes and real file renames at import time
+(docs/CODE-AUDIT.md A10), and these tests are the replacement for it.
+
+`SimpleTestCase` throughout — none of this package touches the ORM, and not
+building a test database keeps the suite runnable on the Pi.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from unittest import mock
+
+from django.test import SimpleTestCase, override_settings
+
+from music.identify import acoustid as acoustid_module
+from music.identify import base, gemini as gemini_module, shazam as shazam_module
+from music.identify.acoustid import AcoustidProvider
+from music.identify.base import IdentifyContext, Provider, TrackMetadata
+from music.identify.gemini import GeminiProvider
+from music.identify.shazam import ShazamProvider
+from music.identify.tags import TagsProvider
+
+
+def make_context(**kwargs) -> IdentifyContext:
+    kwargs.setdefault("path", Path("/library/staging/song.mp3"))
+    return IdentifyContext(**kwargs)
+
+
+# --- fake providers -----------------------------------------------------
+#
+# build_chain() instantiates classes, so behaviour is declared on the class and
+# `make_provider` mints one per scenario. Each records the contexts it saw,
+# which is how chain order and short-circuiting are asserted.
+
+
+class _FakeProvider(Provider):
+    name = "fake"
+    result: TrackMetadata | None = None
+    reason: str = ""
+    error: Exception | None = None
+    calls: list = []
+
+    def unavailable_reason(self) -> str:
+        return self.reason
+
+    def identify(self, ctx):
+        type(self).calls.append(ctx)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def make_provider(name, *, result=None, reason="", error=None):
+    return type(
+        f"Fake_{name}",
+        (_FakeProvider,),
+        {"name": name, "result": result, "reason": reason, "error": error, "calls": []},
+    )
+
+
+class ChainTestCase(SimpleTestCase):
+    """Base for tests that install a synthetic provider set."""
+
+    def setUp(self):
+        base.reset_chain()
+        self.addCleanup(base.reset_chain)
+
+    def install(self, *classes):
+        """Make `classes` the entire universe of providers, in the order given."""
+        registry = {cls.name: cls for cls in classes}
+        patcher = mock.patch.object(base, "_provider_classes", return_value=registry)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return override_settings(IDENTIFY_CHAIN=[cls.name for cls in classes])
+
+
+class ChainOrderTests(ChainTestCase):
+    def test_runs_in_order_and_stops_at_the_first_confident_result(self):
+        first = make_provider("first", result=None)
+        second = make_provider("second", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.9, provider="second"
+        ))
+        third = make_provider("third", result=TrackMetadata(
+            title="Wrong", artist="Nobody", confidence=0.99, provider="third"
+        ))
+
+        with self.install(first, second, third):
+            result = base.identify(make_context())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.provider, "second")
+        self.assertEqual(len(first.calls), 1)
+        self.assertEqual(len(second.calls), 1)
+        # The whole point of the ordering: the expensive tier never ran.
+        self.assertEqual(third.calls, [])
+
+    def test_chain_follows_the_configured_order_not_the_registry_order(self):
+        alpha = make_provider("alpha")
+        beta = make_provider("beta")
+
+        with self.install(alpha, beta), override_settings(
+            IDENTIFY_CHAIN=["beta", "alpha"]
+        ):
+            chain = base.build_chain()
+
+        self.assertEqual([p.name for p in chain], ["beta", "alpha"])
+
+    def test_a_raising_provider_does_not_break_the_chain(self):
+        broken = make_provider("broken", error=RuntimeError("upstream is on fire"))
+        working = make_provider("working", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.8
+        ))
+
+        with self.install(broken, working):
+            with self.assertLogs("music.identify", level="ERROR"):
+                result = base.identify(make_context())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.title, "Dreams")
+        self.assertEqual(len(broken.calls), 1)
+
+    def test_nothing_usable_returns_none(self):
+        empty = make_provider("empty", result=None)
+
+        with self.install(empty):
+            self.assertIsNone(base.identify(make_context()))
+
+    def test_an_empty_chain_is_survivable(self):
+        with self.install():
+            self.assertIsNone(base.identify(make_context()))
+
+
+class ConfidenceThresholdTests(ChainTestCase):
+    def test_a_result_below_the_threshold_is_discarded(self):
+        weak = make_provider("weak", result=TrackMetadata(
+            title="Maybe", artist="Someone", confidence=0.4
+        ))
+        strong = make_provider("strong", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.9
+        ))
+
+        with self.install(weak, strong), override_settings(IDENTIFY_MIN_CONFIDENCE=0.5):
+            result = base.identify(make_context())
+
+        self.assertEqual(result.provider, "strong")
+
+    def test_only_weak_results_means_no_identification(self):
+        weak = make_provider("weak", result=TrackMetadata(
+            title="Maybe", artist="Someone", confidence=0.49
+        ))
+
+        with self.install(weak), override_settings(IDENTIFY_MIN_CONFIDENCE=0.5):
+            self.assertIsNone(base.identify(make_context()))
+
+    def test_raising_the_threshold_rejects_what_a_lower_one_accepted(self):
+        provider = make_provider("provider", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.7
+        ))
+
+        with self.install(provider), override_settings(IDENTIFY_MIN_CONFIDENCE=0.9):
+            self.assertIsNone(base.identify(make_context()))
+
+    def test_an_unusable_result_is_skipped_however_confident(self):
+        # Title but no artist of any kind: cannot be placed in the Plex tree,
+        # so accepting it would only defer the failure to the organizer.
+        titled = make_provider("titled", result=TrackMetadata(
+            title="Dreams", confidence=1.0
+        ))
+        complete = make_provider("complete", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.6
+        ))
+
+        with self.install(titled, complete):
+            result = base.identify(make_context())
+
+        self.assertEqual(result.provider, "complete")
+
+    def test_the_winning_provider_is_stamped_on_an_unstamped_result(self):
+        provider = make_provider("provider", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.9
+        ))
+
+        with self.install(provider):
+            result = base.identify(make_context())
+
+        self.assertEqual(result.provider, "provider")
+
+
+class AvailabilityTests(ChainTestCase):
+    def test_unavailable_providers_are_skipped_with_a_reason(self):
+        missing = make_provider("missing", reason="no key configured")
+        present = make_provider("present", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.9
+        ))
+
+        with self.install(missing, present):
+            with self.assertLogs("music.identify", level="INFO") as logs:
+                chain = base.build_chain()
+
+        self.assertEqual([p.name for p in chain], ["present"])
+        self.assertTrue(any("no key configured" in line for line in logs.output))
+
+    def test_a_skipped_provider_is_never_called(self):
+        missing = make_provider("missing", reason="disabled")
+        present = make_provider("present", result=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", confidence=0.9
+        ))
+
+        with self.install(missing, present):
+            base.identify(make_context())
+
+        self.assertEqual(missing.calls, [])
+
+    def test_a_provider_that_fails_to_construct_is_dropped(self):
+        class Exploding(Provider):
+            name = "exploding"
+
+            def __init__(self):
+                raise RuntimeError("bad wheel for this architecture")
+
+            def identify(self, ctx):
+                return None
+
+        survivor = make_provider("survivor")
+
+        with self.install(Exploding, survivor):
+            with self.assertLogs("music.identify", level="ERROR"):
+                chain = base.build_chain()
+
+        self.assertEqual([p.name for p in chain], ["survivor"])
+
+    @override_settings(
+        IDENTIFY_CHAIN=["tags", "acoustid", "shazam", "gemini"],
+        ACOUSTID_API_KEY="",
+        GEMINI_API_KEY="",
+        SHAZAM_ENABLED=False,
+    )
+    def test_the_real_providers_drop_out_on_missing_configuration(self):
+        chain = base.build_chain()
+        self.assertEqual([p.name for p in chain], ["tags"])
+
+    @override_settings(
+        IDENTIFY_CHAIN=["acoustid"],
+        ACOUSTID_API_KEY="a-real-looking-key",
+        FPCALC_PATH="fpcalc-that-is-definitely-not-installed",
+    )
+    def test_acoustid_needs_the_binary_as_well_as_the_key(self):
+        self.assertEqual(base.build_chain(), [])
+        self.assertIn("fpcalc-that-is-definitely-not-installed",
+                      AcoustidProvider().unavailable_reason())
+
+
+class TrackMetadataTests(SimpleTestCase):
+    def test_is_usable_requires_a_title_and_some_artist(self):
+        self.assertFalse(TrackMetadata().is_usable())
+        self.assertFalse(TrackMetadata(title="Dreams").is_usable())
+        self.assertFalse(TrackMetadata(artist="Fleetwood Mac").is_usable())
+        self.assertTrue(TrackMetadata(title="Dreams", artist="Fleetwood Mac").is_usable())
+        self.assertTrue(
+            TrackMetadata(title="Dreams", album_artist="Various Artists").is_usable()
+        )
+
+    def test_merged_with_lets_self_win_on_every_set_field(self):
+        primary = TrackMetadata(title="Dreams", artist="Fleetwood Mac", track_no=6)
+        secondary = TrackMetadata(
+            title="Ignored", artist="Ignored", album="Rumours", disc_no=1,
+            genre="Rock", is_compilation=True,
+        )
+
+        merged = primary.merged_with(secondary)
+
+        self.assertEqual(merged.title, "Dreams")
+        self.assertEqual(merged.track_no, 6)
+        # Gaps — "" and 0 and False — are filled from the other side.
+        self.assertEqual(merged.album, "Rumours")
+        self.assertEqual(merged.disc_no, 1)
+        self.assertEqual(merged.genre, "Rock")
+        self.assertTrue(merged.is_compilation)
+
+
+class TagsProviderTests(SimpleTestCase):
+    def test_full_tags_score_one(self):
+        ctx = make_context(existing=TrackMetadata(
+            title="Dreams", artist="Fleetwood Mac", album="Rumours", track_no=6
+        ))
+        result = TagsProvider().identify(ctx)
+
+        self.assertEqual(result.confidence, 1.0)
+        self.assertEqual(result.provider, "tags")
+        self.assertEqual(result.track_no, 6)
+
+    def test_title_and_artist_only_score_below_one(self):
+        ctx = make_context(existing=TrackMetadata(title="Dreams", artist="Fleetwood Mac"))
+        self.assertEqual(TagsProvider().identify(ctx).confidence, 0.7)
+
+    def test_partial_tags_still_clear_the_default_threshold(self):
+        # The reason this provider runs first: a tagged library never reaches
+        # the rate-limited tiers at all.
+        ctx = make_context(existing=TrackMetadata(title="Dreams", artist="Fleetwood Mac"))
+        self.assertGreaterEqual(TagsProvider().identify(ctx).confidence, 0.5)
+
+    def test_unusable_tags_pass(self):
+        self.assertIsNone(TagsProvider().identify(make_context()))
+        self.assertIsNone(
+            TagsProvider().identify(make_context(existing=TrackMetadata(album="Rumours")))
+        )
+
+    def test_always_available(self):
+        self.assertTrue(TagsProvider().available())
+
+
+# --- AcoustID -----------------------------------------------------------
+
+#: Shaped like a real api.acoustid.org/v2/lookup response with
+#: meta=recordings+releases+tracks: two results, several candidate recordings,
+#: and a two-disc release carrying the medium/track positions that are the
+#: entire reason this provider exists.
+ACOUSTID_PAYLOAD = {
+    "status": "ok",
+    "results": [
+        {
+            "id": "a-weak-match",
+            "score": 0.41,
+            "recordings": [
+                {"id": "rec-unrelated", "title": "Something Else",
+                 "artists": [{"id": "x", "name": "Another Band"}]}
+            ],
+        },
+        {
+            "id": "0c2b1d3e-3f4a-4b5c-8d9e-0f1a2b3c4d5e",
+            "score": 0.94,
+            "recordings": [
+                {
+                    "id": "rec-live",
+                    "title": "Comfortably Numb (live)",
+                    "duration": 401,
+                    "artists": [{"id": "83d91898", "name": "Pink Floyd"}],
+                    "releases": [{"id": "rel-live", "title": "Delicate Sound of Thunder"}],
+                },
+                {
+                    "id": "b1a2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+                    "title": "Comfortably Numb",
+                    "duration": 383,
+                    "artists": [{"id": "83d91898", "name": "Pink Floyd"}],
+                    "releases": [
+                        {
+                            "id": "rel-remaster",
+                            "title": "The Wall (2011 Remaster)",
+                            "date": {"year": 2011, "month": 9},
+                            "medium_count": 2,
+                            "track_count": 26,
+                            "artists": [{"id": "83d91898", "name": "Pink Floyd"}],
+                            "mediums": [
+                                {"format": "CD", "position": 2, "track_count": 13,
+                                 "tracks": [{"id": "t-remaster", "position": 6,
+                                             "title": "Comfortably Numb"}]}
+                            ],
+                        },
+                        {
+                            "id": "9d4d1b3f-2a5e-4c6b-9f8a-1c2d3e4f5a6b",
+                            "title": "The Wall",
+                            "date": {"year": 1979, "month": 11, "day": 30},
+                            "country": "GB",
+                            "medium_count": 2,
+                            "track_count": 26,
+                            "artists": [{"id": "83d91898", "name": "Pink Floyd"}],
+                            "mediums": [
+                                {"format": "12\" Vinyl", "position": 2, "track_count": 13,
+                                 "tracks": [{"id": "t-original", "position": 6,
+                                             "title": "Comfortably Numb"}]}
+                            ],
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}
+
+VARIOUS_ARTISTS_PAYLOAD = {
+    "status": "ok",
+    "results": [
+        {
+            "id": "compilation-match",
+            "score": 0.88,
+            "recordings": [
+                {
+                    "id": "rec-collab",
+                    "title": "Under Pressure",
+                    "duration": 248,
+                    "artists": [
+                        {"id": "queen", "name": "Queen", "joinphrase": " & "},
+                        {"id": "bowie", "name": "David Bowie"},
+                    ],
+                    "releases": [
+                        {
+                            "id": "rel-comp",
+                            "title": "Now That's What I Call Music! 1",
+                            "date": {"year": 1983},
+                            "medium_count": 1,
+                            "artists": [
+                                {"id": "89ad4ac3-39f7-470e-963a-56509c546377",
+                                 "name": "Various Artists"}
+                            ],
+                            "mediums": [
+                                {"format": "CD", "position": 1,
+                                 "tracks": [{"id": "t", "position": 4,
+                                             "title": "Under Pressure"}]}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ],
+}
+
+
+class FakeHTTPResponse:
+    """The slice of an http.client.HTTPResponse that `_read_body` uses."""
+
+    def __init__(self, body: bytes, headers: dict | None = None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size is None or size < 0 else self._body[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@override_settings(
+    ACOUSTID_API_KEY="test-key",
+    FPCALC_PATH="fpcalc",
+    ACOUSTID_RATE_PER_SEC=100.0,
+    PROVIDER_TIMEOUT_SECONDS=5.0,
+)
+class AcoustidProviderTests(SimpleTestCase):
+    def setUp(self):
+        acoustid_module.reset_for_tests()
+        self.addCleanup(acoustid_module.reset_for_tests)
+
+    def _fpcalc(self, fingerprint="AQADtEmSREkSJUmSJEmS", duration=383.14):
+        return mock.patch.object(
+            acoustid_module.subprocess,
+            "run",
+            return_value=mock.Mock(
+                returncode=0,
+                stdout=json.dumps({"duration": duration, "fingerprint": fingerprint}),
+                stderr="",
+            ),
+        )
+
+    def _lookup(self, payload, headers=None):
+        return mock.patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(json.dumps(payload).encode(), headers),
+        )
+
+    def test_parses_track_and_disc_numbers_from_the_release(self):
+        ctx = make_context()
+
+        with self._fpcalc(), self._lookup(ACOUSTID_PAYLOAD):
+            result = AcoustidProvider().identify(ctx)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.title, "Comfortably Numb")
+        self.assertEqual(result.artist, "Pink Floyd")
+        self.assertEqual(result.album, "The Wall")
+        self.assertEqual(result.album_artist, "Pink Floyd")
+        # The fields Shazam cannot supply and the Plex layout requires.
+        self.assertEqual(result.disc_no, 2)
+        self.assertEqual(result.track_no, 6)
+        self.assertEqual(result.year, 1979)
+        self.assertFalse(result.is_compilation)
+        self.assertEqual(result.confidence, 0.94)
+        self.assertEqual(result.provider, "acoustid")
+        self.assertEqual(
+            result.musicbrainz_recording_id, "b1a2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+        )
+        self.assertEqual(
+            result.musicbrainz_release_id, "9d4d1b3f-2a5e-4c6b-9f8a-1c2d3e4f5a6b"
+        )
+        self.assertIn(result.musicbrainz_release_id, result.cover_url)
+
+    def test_the_highest_scoring_result_wins(self):
+        with self._fpcalc(), self._lookup(ACOUSTID_PAYLOAD):
+            result = AcoustidProvider().identify(make_context())
+
+        self.assertNotEqual(result.title, "Something Else")
+
+    def test_the_recording_matching_the_files_duration_is_chosen(self):
+        # 401s live cut versus the 383s studio take, and the file is 383s.
+        with self._fpcalc(duration=383.0), self._lookup(ACOUSTID_PAYLOAD):
+            result = AcoustidProvider().identify(make_context())
+
+        self.assertEqual(result.title, "Comfortably Numb")
+
+    def test_various_artists_release_is_detected_as_a_compilation(self):
+        with self._fpcalc(duration=248.0), self._lookup(VARIOUS_ARTISTS_PAYLOAD):
+            result = AcoustidProvider().identify(make_context())
+
+        self.assertTrue(result.is_compilation)
+        self.assertEqual(result.album_artist, "Various Artists")
+        # The join phrase is honoured, so the credit reads as written.
+        self.assertEqual(result.artist, "Queen & David Bowie")
+        self.assertEqual(result.track_no, 4)
+
+    def test_fingerprint_and_duration_are_written_back_onto_the_context(self):
+        ctx = make_context()
+
+        with self._fpcalc(fingerprint="AQADtEmS", duration=383.6), \
+                self._lookup(ACOUSTID_PAYLOAD):
+            AcoustidProvider().identify(ctx)
+
+        self.assertEqual(ctx.fingerprint, "AQADtEmS")
+        self.assertEqual(ctx.duration, 384)  # rounded to whole seconds
+
+    def test_a_stored_fingerprint_is_reused_instead_of_recomputed(self):
+        ctx = make_context(fingerprint="AQADtEmS-already-computed", duration=383)
+
+        with self._fpcalc() as run, self._lookup(ACOUSTID_PAYLOAD):
+            result = AcoustidProvider().identify(ctx)
+
+        run.assert_not_called()
+        self.assertIsNotNone(result)
+
+    def test_a_cached_fingerprint_without_a_duration_still_runs_fpcalc(self):
+        # The lookup needs both values, so a duration of 0 is not skippable.
+        ctx = make_context(fingerprint="AQADtEmS", duration=0)
+
+        with self._fpcalc() as run, self._lookup(ACOUSTID_PAYLOAD):
+            AcoustidProvider().identify(ctx)
+
+        run.assert_called_once()
+
+    def test_fpcalc_is_bounded_in_both_time_and_audio_length(self):
+        with self._fpcalc() as run, self._lookup(ACOUSTID_PAYLOAD):
+            AcoustidProvider().identify(make_context())
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "fpcalc")
+        self.assertIn("-length", command)
+        self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+
+    def test_the_lookup_carries_an_explicit_timeout(self):
+        with self._fpcalc(), self._lookup(ACOUSTID_PAYLOAD) as urlopen:
+            AcoustidProvider().identify(make_context())
+
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 5.0)
+
+    def test_the_fingerprint_is_posted_not_put_in_the_url(self):
+        with self._fpcalc(), self._lookup(ACOUSTID_PAYLOAD) as urlopen:
+            AcoustidProvider().identify(make_context())
+
+        request = urlopen.call_args.args[0]
+        self.assertIsNotNone(request.data)
+        self.assertIn(b"fingerprint=", request.data)
+        self.assertIn(b"tracks", request.data)
+
+    def test_a_gzipped_body_is_decompressed(self):
+        import gzip
+
+        body = gzip.compress(json.dumps(ACOUSTID_PAYLOAD).encode())
+        with self._fpcalc(), mock.patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(body, {"Content-Encoding": "gzip"}),
+        ):
+            result = AcoustidProvider().identify(make_context())
+
+        self.assertEqual(result.title, "Comfortably Numb")
+
+    def test_no_match_returns_none(self):
+        with self._fpcalc(), self._lookup({"status": "ok", "results": []}):
+            self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+    def test_an_error_status_returns_none(self):
+        payload = {"status": "error", "error": {"message": "invalid API key"}}
+        with self._fpcalc(), self._lookup(payload):
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+    def test_a_match_with_no_recording_returns_none(self):
+        payload = {"status": "ok", "results": [{"id": "x", "score": 0.9}]}
+        with self._fpcalc(), self._lookup(payload):
+            self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+    def test_a_failed_fpcalc_never_reaches_the_network(self):
+        run = mock.patch.object(
+            acoustid_module.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=1, stdout="", stderr="ERROR: no such file"),
+        )
+        with run, mock.patch("urllib.request.urlopen") as urlopen:
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+        urlopen.assert_not_called()
+
+    def test_a_timed_out_fpcalc_returns_none(self):
+        run = mock.patch.object(
+            acoustid_module.subprocess,
+            "run",
+            side_effect=acoustid_module.subprocess.TimeoutExpired("fpcalc", 5.0),
+        )
+        with run, mock.patch("urllib.request.urlopen"):
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+    def test_a_network_failure_returns_none_rather_than_raising(self):
+        with self._fpcalc(), mock.patch(
+            "urllib.request.urlopen",
+            side_effect=acoustid_module.urllib.error.URLError("no route to host"),
+        ):
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(AcoustidProvider().identify(make_context()))
+
+
+# --- Shazam -------------------------------------------------------------
+
+SHAZAM_RESPONSE = {
+    "matches": [{"id": "123", "offset": 12.3}],
+    "track": {
+        "key": "40333609",
+        "title": "Dreams",
+        "subtitle": "Fleetwood Mac",
+        "images": {
+            "coverart": "https://example.invalid/cover-200.jpg",
+            "coverarthq": "https://example.invalid/cover-800.jpg",
+        },
+        "genres": {"primary": "Rock"},
+        "sections": [
+            {
+                "type": "SONG",
+                "metadata": [
+                    {"title": "Album", "text": "Rumours"},
+                    {"title": "Label", "text": "Warner Records"},
+                    {"title": "Released", "text": "1977"},
+                ],
+            },
+            {"type": "LYRICS", "text": ["Now here you go again"]},
+        ],
+    },
+}
+
+
+@override_settings(
+    SHAZAM_ENABLED=True, SHAZAM_RATE_PER_MIN=6000.0, PROVIDER_TIMEOUT_SECONDS=5.0
+)
+class ShazamProviderTests(SimpleTestCase):
+    def setUp(self):
+        shazam_module.reset_for_tests()
+        self.addCleanup(shazam_module.reset_for_tests)
+
+    def test_parses_a_recognition_response(self):
+        result = shazam_module.parse_recognition(SHAZAM_RESPONSE)
+
+        self.assertEqual(result.title, "Dreams")
+        self.assertEqual(result.artist, "Fleetwood Mac")
+        self.assertEqual(result.album, "Rumours")
+        self.assertEqual(result.year, 1977)
+        self.assertEqual(result.genre, "Rock")
+        self.assertEqual(result.cover_url, "https://example.invalid/cover-800.jpg")
+        self.assertEqual(result.confidence, 0.8)
+        self.assertEqual(result.provider, "shazam")
+        # Shazam knows nothing about album artists or track positions.
+        self.assertEqual(result.album_artist, "")
+        self.assertEqual(result.track_no, 0)
+
+    def test_a_full_date_still_yields_a_year(self):
+        response = json.loads(json.dumps(SHAZAM_RESPONSE))
+        response["track"]["sections"][0]["metadata"][2]["text"] = "4 February 1977"
+        self.assertEqual(shazam_module.parse_recognition(response).year, 1977)
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(shazam_module.parse_recognition({}))
+        self.assertIsNone(shazam_module.parse_recognition({"matches": []}))
+        self.assertIsNone(shazam_module.parse_recognition(None))
+
+    def test_a_match_missing_an_artist_returns_none(self):
+        self.assertIsNone(shazam_module.parse_recognition({"track": {"title": "Dreams"}}))
+
+    def test_identify_uses_the_recognizer_and_parses_it(self):
+        with mock.patch.object(
+            shazam_module, "_recognize", return_value=SHAZAM_RESPONSE
+        ) as recognize:
+            result = ShazamProvider().identify(make_context())
+
+        recognize.assert_called_once()
+        self.assertEqual(result.title, "Dreams")
+
+    def test_a_recognition_timeout_returns_none(self):
+        with mock.patch.object(
+            shazam_module, "_recognize", side_effect=asyncio.TimeoutError()
+        ):
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(ShazamProvider().identify(make_context()))
+
+    def test_a_missing_dependency_returns_none_rather_than_raising(self):
+        with mock.patch.object(
+            shazam_module, "_recognize", side_effect=ImportError("no module shazamio")
+        ):
+            with self.assertLogs("music.identify", level="WARNING"):
+                self.assertIsNone(ShazamProvider().identify(make_context()))
+
+    @override_settings(SHAZAM_ENABLED=False)
+    def test_disabled_by_setting(self):
+        self.assertFalse(ShazamProvider().available())
+        self.assertIn("SHAZAM_ENABLED", ShazamProvider().unavailable_reason())
+
+
+# --- Gemini -------------------------------------------------------------
+
+
+@override_settings(
+    GEMINI_API_KEY="test-key",
+    GEMINI_MODEL="gemini-flash-latest",
+    GEMINI_RATE_PER_MIN=6000.0,
+    GEMINI_DAILY_BUDGET=5,
+    PROVIDER_TIMEOUT_SECONDS=5.0,
+)
+class GeminiProviderTests(SimpleTestCase):
+    ANSWER = json.dumps({
+        "title": "Dreams",
+        "artist": "Fleetwood Mac",
+        "album": "Rumours",
+        "year": 1977,
+        "is_compilation": False,
+    })
+
+    def setUp(self):
+        gemini_module.reset_for_tests()
+        self.addCleanup(gemini_module.reset_for_tests)
+
+    def _generate(self, *responses):
+        return mock.patch.object(
+            GeminiProvider, "_generate", side_effect=list(responses)
+        )
+
+    def test_infers_metadata_from_the_video_title(self):
+        ctx = make_context(hint_title="Fleetwood Mac - Dreams (HQ Audio)")
+
+        with self._generate(self.ANSWER):
+            result = GeminiProvider().identify(ctx)
+
+        self.assertEqual(result.title, "Dreams")
+        self.assertEqual(result.artist, "Fleetwood Mac")
+        self.assertEqual(result.album, "Rumours")
+        self.assertEqual(result.year, 1977)
+        self.assertEqual(result.confidence, 0.55)
+        self.assertEqual(result.provider, "gemini")
+
+    def test_the_prompt_carries_the_title_and_no_media(self):
+        ctx = make_context(
+            hint_title="Fleetwood Mac - Dreams", hint_url="https://youtu.be/abc"
+        )
+
+        with self._generate(self.ANSWER) as generate:
+            GeminiProvider().identify(ctx)
+
+        prompt = generate.call_args.args[0]
+        self.assertIn("Fleetwood Mac - Dreams", prompt)
+        self.assertIn("https://youtu.be/abc", prompt)
+        self.assertIsInstance(prompt, str)  # text only — never a file upload
+
+    @override_settings(GEMINI_DAILY_BUDGET=1)
+    def test_budget_exhaustion_returns_none_without_calling_the_model(self):
+        ctx = make_context(hint_title="Fleetwood Mac - Dreams")
+
+        with self._generate(self.ANSWER) as generate:
+            first = GeminiProvider().identify(ctx)
+            with self.assertLogs("music.identify", level="WARNING"):
+                second = GeminiProvider().identify(ctx)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        # The whole point: the second track costs no quota, and does not block.
+        self.assertEqual(generate.call_count, 1)
+
+    @override_settings(GEMINI_DAILY_BUDGET=1)
+    def test_budget_exhaustion_is_logged_once_not_once_per_track(self):
+        ctx = make_context(hint_title="Fleetwood Mac - Dreams")
+
+        with self._generate(self.ANSWER, self.ANSWER, self.ANSWER):
+            GeminiProvider().identify(ctx)
+            with self.assertLogs("music.identify", level="WARNING") as logs:
+                GeminiProvider().identify(ctx)
+                GeminiProvider().identify(ctx)
+
+        exhausted = [line for line in logs.output if "daily budget" in line]
+        self.assertEqual(len(exhausted), 1)
+
+    @override_settings(GEMINI_DAILY_BUDGET=0)
+    def test_a_zero_budget_disables_the_provider_entirely(self):
+        self.assertFalse(GeminiProvider().available())
+        with self._generate(self.ANSWER) as generate:
+            self.assertIsNone(
+                GeminiProvider().identify(make_context(hint_title="Anything"))
+            )
+        generate.assert_not_called()
+
+    def test_an_opaque_filename_is_not_worth_a_call(self):
+        # What a yt-dlp download is named. A video id tells the model nothing,
+        # and asking anyway spends a call from a very small daily allowance.
+        ctx = make_context(path=Path("/staging/dQw4w9WgXcQ.mp3"))
+
+        with self._generate(self.ANSWER) as generate:
+            self.assertIsNone(GeminiProvider().identify(ctx))
+
+        generate.assert_not_called()
+
+    def test_a_descriptive_filename_is_used_when_nothing_better_exists(self):
+        # What a scanned library file is usually named, and the case this
+        # provider is actually good at.
+        ctx = make_context(path=Path("/music/Fleetwood Mac - Dreams.mp3"))
+
+        with self._generate(self.ANSWER) as generate:
+            result = GeminiProvider().identify(ctx)
+
+        self.assertIn("Fleetwood Mac - Dreams", generate.call_args.args[0])
+        self.assertEqual(result.title, "Dreams")
+
+    def test_a_request_failure_returns_none_rather_than_raising(self):
+        with mock.patch.object(
+            GeminiProvider, "_generate", side_effect=RuntimeError("429 quota exceeded")
+        ):
+            with self.assertLogs("music.identify", level="WARNING"):
+                result = GeminiProvider().identify(
+                    make_context(hint_title="Fleetwood Mac - Dreams")
+                )
+        self.assertIsNone(result)
+
+    def test_missing_key_makes_the_provider_unavailable(self):
+        with override_settings(GEMINI_API_KEY=""):
+            self.assertFalse(GeminiProvider().available())
+            self.assertIn("GEMINI_API_KEY", GeminiProvider().unavailable_reason())
+
+    # --- response parsing, which is where a model misbehaves ---
+
+    def test_parse_response_strips_a_markdown_fence(self):
+        raw = f"```json\n{self.ANSWER}\n```"
+        self.assertEqual(gemini_module.parse_response(raw)["title"], "Dreams")
+
+    def test_parse_response_recovers_an_object_from_surrounding_prose(self):
+        raw = f"Sure! Here is the metadata:\n{self.ANSWER}\nHope that helps."
+        self.assertEqual(gemini_module.parse_response(raw)["artist"], "Fleetwood Mac")
+
+    def test_parse_response_rejects_junk(self):
+        for raw in ("", "   ", "I don't know", "[1, 2, 3]", "{not json}", None):
+            self.assertIsNone(gemini_module.parse_response(raw), raw)
+
+    def test_placeholder_answers_are_treated_as_unknown(self):
+        answer = json.dumps({"title": "Dreams", "artist": "Unknown Artist"})
+        with self._generate(answer):
+            self.assertIsNone(
+                GeminiProvider().identify(make_context(hint_title="something"))
+            )
+
+    def test_a_compilation_answer_sets_the_various_artists_album_artist(self):
+        answer = json.dumps({
+            "title": "Under Pressure",
+            "artist": "Queen & David Bowie",
+            "album": "Now That's What I Call Music! 1",
+            "year": "1983",
+            "is_compilation": "true",
+        })
+        with self._generate(answer):
+            result = GeminiProvider().identify(make_context(hint_title="Under Pressure"))
+
+        self.assertTrue(result.is_compilation)
+        self.assertEqual(result.album_artist, "Various Artists")
+        self.assertEqual(result.year, 1983)  # coerced from the string the model sent
+
+    def test_an_impossible_year_is_dropped(self):
+        answer = json.dumps({"title": "Dreams", "artist": "Fleetwood Mac", "year": 77})
+        with self._generate(answer):
+            self.assertEqual(
+                GeminiProvider().identify(make_context(hint_title="x")).year, 0
+            )
