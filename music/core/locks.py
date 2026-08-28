@@ -1,18 +1,4 @@
-"""
-Per-key mutexes.
-
-The previous version could run a DELETE job for a track while a DOWNLOAD job
-for the same track was mid-flight on another worker thread: the file was
-removed and the row deleted underneath the downloader, whose next save()
-silently re-INSERTed the deleted row because the primary key was still set
-(docs/CODE-AUDIT.md A5).
-
-Everything runs in one process, so a keyed mutex is the whole fix — no
-distributed lock, no advisory row locking, no extra dependency.
-
-Locks are reference-counted and dropped when idle, so scanning a large library
-does not leave one lock object per track alive forever.
-"""
+"""Per-key mutexes, so two jobs never touch the same track at once."""
 
 from __future__ import annotations
 
@@ -30,14 +16,8 @@ class KeyedLocks:
         with self._guard:
             entry = self._locks.get(key)
             if entry is None:
-                # Re-entrant on purpose. A job handler takes the track's lock
-                # and then calls library code that takes it again for exactly
-                # the same reason (organizer.apply_track, revert_track). With a
-                # plain Lock that nesting is a deadlock which no timeout would
-                # catch — the worker would sit there until the lease expired,
-                # the reaper would requeue the job, and it would wedge again.
-                # RLock keeps mutual exclusion between threads, which is the
-                # whole guarantee this class exists to provide.
+                # RLock, not Lock: a handler takes the track lock and then calls
+                # library code (organizer.apply_track) that takes it again.
                 entry = [threading.RLock(), 0]
                 self._locks[key] = entry
             entry[1] += 1
@@ -56,12 +36,8 @@ class KeyedLocks:
     def acquire(self, key: str, *, timeout: float | None = None):
         """Hold the lock for `key` for the duration of the block.
 
-        Yields True when the lock was taken, False when `timeout` elapsed
-        first. Callers that pass a timeout MUST check the yielded value:
-
-            with locks.acquire(key, timeout=0) as got:
-                if not got:
-                    return  # someone else owns this track right now
+        Yields True when the lock was taken, False when `timeout` elapsed first;
+        a caller passing a timeout MUST check the yielded value.
         """
         lock = self._acquire_entry(key)
         acquired = False

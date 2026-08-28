@@ -1,27 +1,8 @@
-"""
-Tier 2 — AcoustID / Chromaprint → MusicBrainz. The workhorse.
+"""Tier 2 — AcoustID / Chromaprint -> MusicBrainz.
 
-This provider exists for one field the others cannot give us. Shazam knows what
-a song *is*; MusicBrainz knows where it *sits* — which disc, which track number
-— and the Plex layout is built from exactly those two numbers
-(docs/ARCHITECTURE.md, docs/MUSIC-LIBRARY-MERGE.md). Everything else AcoustID
-returns is a bonus; the track/disc position is the reason it is in the chain and
-the reason the `tracks` meta flag is requested below.
-
-Two implementation choices worth stating, both driven by the Pi:
-
-**No `pyacoustid`.** The library would add a compiled Chromaprint binding on a
-box where armv7 wheels come from piwheels and every new dependency is a
-deployment risk (CLAUDE.md). What it does for us is a `fpcalc` subprocess and
-one HTTP GET/POST, which is thirty lines of stdlib. `requests` is avoided for
-the same reason — `urllib.request` is already installed and takes a `timeout`.
-
-**Bounded work everywhere.** `fpcalc` is given `-length`, so the decode cost is
-the same for a three-minute single and a two-hour DJ set; the subprocess carries
-a timeout so a wedged decoder is killed rather than holding a worker's lease
-(docs/CODE-AUDIT.md A6); the HTTP call carries `PROVIDER_TIMEOUT_SECONDS`; the
-response read is capped; and the rate limiter is acquired *with* a timeout, so a
-saturated bucket makes the provider pass rather than park a thread on it.
+The only provider that supplies disc and track number, which is what the Plex
+layout is built from. Uses `fpcalc` plus stdlib urllib rather than pyacoustid,
+to avoid a compiled dependency on armv7.
 """
 
 from __future__ import annotations
@@ -46,55 +27,38 @@ log = logging.getLogger("music.identify")
 
 LOOKUP_URL = "https://api.acoustid.org/v2/lookup"
 
-#: `recordings` and `releases` give the names; `tracks` is what makes the
-#: `mediums[].tracks[].position` structure appear, and without it the track and
-#: disc numbers — the entire point of this provider — are simply absent from
-#: the response. `compress` asks for a gzipped body, which urllib does not
-#: transparently decode; `_read_body` handles that.
-#: Meta flags, SPACE separated — not "+" separated.
+#: Meta flags, SPACE separated — NOT "+" separated. urlencode percent-encodes a
+#: literal "+" as "%2B", so "recordings+releases" reaches AcoustID as one
+#: unknown flag and the response comes back with results but zero recordings
+#: attached. A space encodes to "+" on the wire, which is what the server wants.
+#: Measured on one real file: "+"-joined gave 11 results and 0 recordings;
+#: space-joined gave 11 results, 11 recordings and 103 releases.
 #:
-#: https://acoustid.org/webservice says the values are "combined with space
-#: separation", and this is the difference between the provider working and
-#: silently returning nothing. urlencode percent-encodes a literal "+" as
-#: "%2B", so "recordings+releases" reaches AcoustID as the single unknown flag
-#: `recordings+releases` rather than as two flags, and the response comes back
-#: with results but zero recordings attached. A space encodes to "+" on the
-#: wire, which is what the server expects.
-#:
-#: Measured against one real file: "recordings+releases+tracks+compress" gave
-#: 11 results and 0 recordings; "recordings releases tracks compress" gave 11
-#: results, 11 recordings and 103 releases — including the track and disc
-#: numbers that are the whole reason for using AcoustID over Shazam.
-#:
-#: `tracks` is what carries medium/track position; `compress` shrinks a
-#: response that routinely runs to hundreds of releases.
+#: `tracks` carries the medium/track position — without it the disc and track
+#: numbers, the whole point of this provider, are absent. `compress` asks for a
+#: gzipped body, which urllib does not decode; `_read_body` handles that.
 LOOKUP_META = "recordings releases tracks compress"
 
-#: Seconds of audio Chromaprint reads. AcoustID's own index is built from the
-#: first two minutes, so more buys no accuracy and costs real ARMv7 CPU.
+#: Seconds of audio Chromaprint reads. AcoustID's index is built from the first
+#: two minutes, so more buys no accuracy and costs real ARMv7 CPU.
 FPCALC_LENGTH_SECONDS = 120
 
-#: A lookup response is a few KB. The cap is not a tuning knob, it is a refusal
-#: to allocate an unbounded body into 1GB of shared RAM.
+#: A refusal to allocate an unbounded body into 1GB of shared RAM.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 #: MusicBrainz's special-purpose artist for compilations.
 VARIOUS_ARTISTS_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
 VARIOUS_ARTISTS = "Various Artists"
 
-#: Used to rank recordings when the file's duration is unknown, so every
-#: candidate ranks equally and the tie-break (has releases, then API order)
-#: decides instead.
+#: Ranking value when the duration is unknown, so every candidate ties and the
+#: tie-break decides instead.
 _NO_DURATION_MATCH = 10_000
 
 USER_AGENT = "music-manager/1.0 (+https://acoustid.org/)"
 
 
-# --- shared limiter -----------------------------------------------------
-#
-# Module-level, because the chain is rebuilt whenever settings change and a
-# per-instance bucket would start full every time — which is not a rate limit,
-# it is a rate limit shaped hole. AcoustID asks for no more than 3 req/s.
+# Module-level: the chain is rebuilt whenever settings change, and a
+# per-instance bucket would start full every time and limit nothing.
 
 _limiter: RateLimiter | None = None
 _limiter_lock = threading.Lock()
@@ -147,10 +111,8 @@ class AcoustidProvider(Provider):
     def _ensure_fingerprint(self, ctx: IdentifyContext) -> bool:
         """Fill `ctx.fingerprint` and `ctx.duration`, running fpcalc only if needed.
 
-        The lookup needs both values, so a cached fingerprint with an unknown
-        duration is not enough to skip the decode. When we do run it, the
-        results are written back onto the context: the caller persists them onto
-        the Track, and a retry after a network failure then costs no CPU at all.
+        The lookup needs both, so a cached fingerprint with an unknown duration
+        is not enough to skip the decode.
         """
         if ctx.fingerprint and ctx.duration > 0:
             log.debug("acoustid: reusing the stored fingerprint for %s", ctx.path.name)
@@ -186,8 +148,6 @@ class AcoustidProvider(Provider):
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            # run() has already killed the child, so no orphan decoder is left
-            # burning a core.
             log.warning(
                 "acoustid: fpcalc timed out after %.0fs on %s",
                 settings.PROVIDER_TIMEOUT_SECONDS, ctx.path,
@@ -198,16 +158,12 @@ class AcoustidProvider(Provider):
             return None
 
         # Deliberately NOT gated on the exit code. fpcalc routinely exits
-        # non-zero while still writing a perfectly good fingerprint to stdout —
-        # a real 20-second MP3 produces "ERROR: Error decoding audio frame (End
-        # of file)" on stderr and exit status 3, because it reports trouble
-        # decoding the final partial frame after it has already fingerprinted
-        # the audio. Treating that as failure disabled AcoustID on every file,
-        # which is invisible from the outside: the chain simply falls through to
-        # Shazam and Gemini and looks like it is working.
-        #
-        # The output is the authority. A fingerprint means success whatever the
-        # exit code said; no fingerprint is a failure whatever it said.
+        # non-zero while still writing a good fingerprint to stdout — it reports
+        # trouble decoding the final partial frame ("ERROR: Error decoding audio
+        # frame (End of file)", exit 3) after already fingerprinting the audio.
+        # Treating that as failure disables AcoustID on every file, invisibly:
+        # the chain just falls through to Shazam and Gemini and looks fine.
+        # The output is the authority, not the exit code.
         try:
             data = json.loads(completed.stdout or "{}")
         except ValueError:
@@ -255,8 +211,8 @@ class AcoustidProvider(Provider):
             }
         ).encode("ascii")
 
-        # POST, not GET: a Chromaprint fingerprint is a couple of kilobytes of
-        # base64 and would sit well past what some proxies allow in a URL.
+        # POST, not GET: a fingerprint is kilobytes of base64, past what some
+        # proxies allow in a URL.
         request = urllib.request.Request(
             LOOKUP_URL,
             data=body,
@@ -276,8 +232,6 @@ class AcoustidProvider(Provider):
             log.warning("acoustid: lookup returned HTTP %s", exc.code)
             return None
         except (urllib.error.URLError, OSError) as exc:
-            # The audit's A6 hang was an untimed urlopen; this one always ends,
-            # and a Pi that has dropped its wifi simply fails the track.
             log.warning("acoustid: lookup failed: %s", exc)
             return None
 
@@ -292,8 +246,7 @@ class AcoustidProvider(Provider):
 def _read_body(response) -> str:
     """Read at most MAX_RESPONSE_BYTES, decompressing if the server gzipped it.
 
-    urllib, unlike `requests`, neither advertises nor decodes gzip on its own,
-    so the `compress` meta flag would otherwise hand us a binary blob.
+    urllib does not decode gzip, so `compress` would hand us a binary blob.
     """
     raw = response.read(MAX_RESPONSE_BYTES)
     if (response.headers.get("Content-Encoding") or "").lower() == "gzip":
@@ -307,9 +260,8 @@ def _read_body(response) -> str:
 
 # --- parsing ------------------------------------------------------------
 #
-# Split out as plain functions over plain dicts: the response shape is the part
-# most likely to drift, and this way it is testable against a captured payload
-# with no network, no subprocess and no settings.
+# Plain functions over plain dicts, so the response shape is testable against a
+# captured payload with no network, subprocess or settings.
 
 
 def parse_lookup(payload: dict, ctx: IdentifyContext) -> TrackMetadata | None:
@@ -331,8 +283,7 @@ def parse_lookup(payload: dict, ctx: IdentifyContext) -> TrackMetadata | None:
 
     recording = _pick_recording(best.get("recordings") or [], ctx.duration)
     if recording is None:
-        # A fingerprint match with no MusicBrainz recording attached happens for
-        # tracks nobody has linked yet. There is nothing to write, so pass.
+        # A match with no MusicBrainz recording attached: nothing to write.
         log.debug("acoustid: %s matched but carries no recording", ctx.path.name)
         return None
 
@@ -355,8 +306,8 @@ def parse_lookup(payload: dict, ctx: IdentifyContext) -> TrackMetadata | None:
         disc_no, track_no = _track_position(release)
         release_id = str(release.get("id") or "")
         if release_id:
-            # Costs no request here — the tagger fetches it later, under its own
-            # timeout, and tolerates the 404 that releases without art return.
+            # No request here; the tagger fetches it later under its own timeout
+            # and tolerates the 404 that releases without art return.
             cover_url = f"https://coverartarchive.org/release/{release_id}/front-500"
 
     if is_compilation:
@@ -383,10 +334,7 @@ def _pick_recording(recordings: list, duration: int) -> dict | None:
     """The recording whose length best matches the file.
 
     One fingerprint routinely matches a studio cut, a radio edit and three live
-    versions. Duration is the only signal available to tell them apart, and
-    picking the wrong one puts a 7-minute album version under the single's
-    track number. When the duration is unknown every candidate ties and the
-    tie-break — has releases, then the order AcoustID ranked them in — decides.
+    versions; duration is the only signal that tells them apart.
     """
     candidates = [
         r for r in recordings if isinstance(r, dict) and str(r.get("title") or "").strip()
@@ -406,12 +354,10 @@ def _pick_recording(recordings: list, duration: int) -> dict | None:
 
 
 def _pick_release(releases: list) -> dict | None:
-    """The release that actually tells us where the track sits, else the oldest.
+    """The release that tells us where the track sits, else the oldest.
 
-    A recording can appear on the original album, four compilations and a
-    remaster. Preferring one that carries a medium/track position keeps the
-    numbers we came here for; preferring the earliest year after that picks the
-    original album over a later reissue.
+    A medium/track position keeps the numbers we came for; the earliest year
+    then picks the original over a later reissue.
     """
     candidates = [r for r in releases if isinstance(r, dict)]
     if not candidates:
@@ -427,9 +373,8 @@ def _pick_release(releases: list) -> dict | None:
 def _track_position(release: dict) -> tuple[int, int]:
     """(disc_no, track_no) from the release's medium data, or (0, 0).
 
-    The response includes only the medium and track that matched, so the first
-    entry carrying a position is the one we want. A single-disc release reports
-    medium position 1, which `plex.py` correctly declines to prepend.
+    Only the matched medium and track are in the response, so the first entry
+    carrying a position is the one we want.
     """
     for medium in release.get("mediums") or []:
         if not isinstance(medium, dict):
@@ -446,9 +391,7 @@ def _track_position(release: dict) -> tuple[int, int]:
 def _artist_credit(entity: dict) -> tuple[str, bool]:
     """The credited artist string, and whether it is the Various Artists marker.
 
-    MusicBrainz splits a credit into parts with join phrases, so "A feat. B"
-    arrives as two artists; joining on the phrases reproduces the credit as
-    written rather than inventing a comma.
+    MusicBrainz splits "A feat. B" into two artists plus a join phrase.
     """
     artists = [a for a in (entity.get("artists") or []) if isinstance(a, dict)]
     if not artists:
@@ -479,11 +422,8 @@ def _release_year(release: dict) -> int:
 
 
 def _as_float(value) -> float:
-    """Coerce whatever the API sent into a number. 0.0 for anything that is not.
-
-    The API is well behaved, but this is the seam where a None or a string would
-    otherwise raise inside a `max()` key and take out the whole result set.
-    """
+    """Coerce whatever the API sent into a number, else 0.0. A None or a string
+    would otherwise raise inside a `max()` key and lose the whole result set."""
     try:
         return float(value)
     except (TypeError, ValueError):

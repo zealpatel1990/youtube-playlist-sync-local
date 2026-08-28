@@ -1,11 +1,4 @@
-"""
-Identification job handlers.
-
-The chain (tags → acoustid → shazam → gemini) is the expensive part of the
-pipeline, so it is driven one track at a time through the job queue rather than
-in a loop: that way a wedge affects one track, the lease reaps it, and the
-remaining work is untouched.
-"""
+"""Identification job handlers: one job per track through the provider chain."""
 
 from __future__ import annotations
 
@@ -21,8 +14,7 @@ from music.jobs.registry import job
 
 log = logging.getLogger("music.jobs.identify")
 
-#: Everything _apply_metadata and the success path touch. Kept beside them so
-#: adding a field to one without the other is an obvious omission.
+#: Every field _apply_metadata and the success path touch; keep in sync.
 _IDENTIFIED_FIELDS = [
     "title", "artist", "album", "album_artist",
     "track_no", "disc_no", "year", "genre", "is_compilation",
@@ -90,9 +82,8 @@ def identify_track(job_obj) -> str:
         _apply_metadata(track, result)
         track.clear_failure()
         track.state = TrackState.IDENTIFIED
-        # update_fields is not cosmetic here: Track's primary key is set, so a
-        # bare save() against a row a concurrent DELETE removed would fall
-        # through to an INSERT and silently resurrect it (docs/CODE-AUDIT.md A5).
+        # update_fields is required: the pk is set, so a bare save() against a
+        # row a concurrent DELETE removed would INSERT and resurrect it.
         track.save(update_fields=_IDENTIFIED_FIELDS)
 
         engine.enqueue(
@@ -127,11 +118,7 @@ def _apply_metadata(track: Track, meta) -> None:
 @job("identify.pending", max_attempts=1,
      description="Queue identification for every track that still needs it")
 def identify_pending(job_obj) -> str:
-    """Fan out: enqueue one identify.track job per track needing identification.
-
-    Kept as a fan-out rather than a loop so each track gets its own lease,
-    retry budget and error message.
-    """
+    """Fan out: enqueue one identify.track job per track needing identification."""
     limit = int(job_obj.payload.get("limit") or 500)
     ids = (
         Track.objects.filter(state__in=[TrackState.DISCOVERED, TrackState.FAILED])

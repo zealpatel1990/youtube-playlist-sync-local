@@ -1,20 +1,10 @@
-"""
-Data model.
+"""Data model. `Track` is the root object: one audio file on disk.
 
-`Track` is the root object: one audio file on disk, wherever it came from.
-A disk scan and a YouTube download both produce Tracks, so identification,
-tagging and organization are written once and serve both.
-
-Design notes carried over from the audit of the previous version:
-
-* Unknown numbers are stored as 0, never NULL. `duration`, `track_no` and
-  `disc_no` are compared against thresholds all over the identification code,
-  and a NULL that reaches a comparison raises TypeError at a distance
-  (docs/CODE-AUDIT.md A14). 0 means "unknown" and compares harmlessly.
-* Every failure path sets `state=FAILED` plus `retry_at`, in one helper, so no
-  state can be both "failed" and invisible to the retry query (A3/A4).
-* `Job` dedup is enforced by a partial unique index rather than a
-  check-then-create in Python, which raced (A6).
+Unknown numbers are stored as 0, never NULL. `duration`, `track_no` and
+`disc_no` are compared against thresholds all over the identification code, and
+a NULL reaching a comparison raises TypeError at a distance; 0 compares
+harmlessly. Every failure path goes through `mark_failed`, so no track can be
+both FAILED and invisible to the retry query.
 """
 
 from __future__ import annotations
@@ -56,13 +46,13 @@ class Track(models.Model):
     plan_note = models.CharField(max_length=255, blank=True)
 
     size_bytes = models.BigIntegerField(default=0)
-    #: Filesystem mtime as a unix timestamp; cheap change detection on rescan.
+    #: Unix timestamp; cheap change detection on rescan.
     mtime = models.FloatField(default=0.0)
-    #: Hash of the file contents. Populated lazily — hashing is an IO pass.
+    #: Populated lazily — hashing is a full IO pass.
     content_hash = models.CharField(max_length=64, blank=True, db_index=True)
 
     # --- audio properties ----------------------------------------------
-    #: Seconds. 0 means unknown (never NULL — see module docstring).
+    #: Seconds. 0 means unknown, never NULL — see the module docstring.
     duration = models.PositiveIntegerField(default=0)
     bitrate = models.PositiveIntegerField(default=0)
     #: Chromaprint fingerprint, reused across identification attempts.
@@ -73,7 +63,6 @@ class Track(models.Model):
     artist = models.CharField(max_length=512, blank=True)
     album = models.CharField(max_length=512, blank=True)
     album_artist = models.CharField(max_length=512, blank=True)
-    #: 0 means unknown.
     track_no = models.PositiveIntegerField(default=0)
     disc_no = models.PositiveIntegerField(default=0)
     year = models.PositiveIntegerField(default=0)
@@ -138,12 +127,8 @@ class Track(models.Model):
         return self.album_artist or self.artist
 
     def mark_failed(self, error: str, *, backoff_base_hours: float = 2.0) -> None:
-        """The single failure path.
-
-        Every caller uses this, so a failed track is always both FAILED *and*
-        carrying a retry_at that the retry query can see. The previous version
-        had two divergent failure paths and tracks fell between them (A3/A4).
-        """
+        """The single failure path, so a failed track is always both FAILED
+        *and* carrying a retry_at that the retry query can see."""
         self.fail_count += 1
         self.state = TrackState.FAILED
         self.last_error = (error or "")[:2000]
@@ -176,8 +161,7 @@ class Availability(models.TextChoices):
 class YoutubeVideo(models.Model):
     """A YouTube playlist entry. A thin source record pointing at a Track."""
 
-    #: Not assumed to be 11 characters — that assumption was baked into the
-    #: previous schema and would truncate any future id format.
+    #: Not assumed to be 11 characters, so a future id format is not truncated.
     video_id = models.CharField(max_length=32, primary_key=True)
     title = models.CharField(max_length=512, blank=True)
     uploader = models.CharField(max_length=255, blank=True)
@@ -255,20 +239,15 @@ class JobState(models.TextChoices):
 
 
 class Job(models.Model):
-    """A unit of background work.
-
-    Durable in the database so work survives a restart, but workers are woken
-    by an in-process event rather than by polling this table — an idle system
-    issues no queries at all.
-    """
+    """A unit of background work. Durable so it survives a restart, but workers
+    are woken by an in-process event rather than by polling this table."""
 
     kind = models.CharField(max_length=64, db_index=True)
-    #: Handler arguments. Generic, so a job is not tied to one model.
+    #: Handler arguments.
     payload = models.JSONField(default=dict, blank=True)
 
-    #: Non-empty for dedupable work. A partial unique index (below) makes
-    #: "only one active job per key" a database guarantee rather than a
-    #: check-then-create race.
+    #: Non-empty for dedupable work. The partial unique index below makes "only
+    #: one active job per key" a database guarantee, not a check-then-create.
     dedup_key = models.CharField(max_length=255, blank=True)
 
     state = models.CharField(
@@ -280,10 +259,10 @@ class Job(models.Model):
     attempts = models.PositiveIntegerField(default=0)
     max_attempts = models.PositiveIntegerField(default=3)
 
-    #: A claimed job holds a lease. The reaper reclaims expired ones, so a
-    #: wedged handler self-heals instead of blocking the queue until a restart.
+    #: The reaper reclaims expired leases, so a wedged handler self-heals
+    #: instead of blocking the queue until a restart.
     lease_expires_at = models.DateTimeField(null=True, blank=True)
-    #: Delayed retry; a job is not claimable before this time.
+    #: A job is not claimable before this time.
     scheduled_for = models.DateTimeField(default=timezone.now)
 
     message = models.TextField(blank=True)

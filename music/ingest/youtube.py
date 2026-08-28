@@ -1,26 +1,8 @@
-"""
-YouTube ingestion: listing a playlist, and downloading one video's audio.
+"""YouTube ingestion: listing a playlist, and downloading one video's audio.
 
-yt-dlp and ffmpeg are the two heaviest things this box runs, so this module is
-shaped around that rather than around convenience:
-
-* `yt_dlp` is imported lazily, inside `_ydl()`. Importing it builds a large
-  extractor table; a web request that only renders the dashboard should not pay
-  for that, and a Pi 2 notices. `_ydl` is also the single seam the tests patch,
-  which is what keeps the suite offline.
-* Exactly one download runs at a time, process-wide (`_download_slot`). With
-  WORKER_THREADS=2, two workers would otherwise run two yt-dlp downloads and
-  two ffmpeg transcodes across four 900MHz cores sharing 1GB of RAM — slower
-  than doing them in sequence, and a good way to start swapping.
-* Every subprocess call carries an explicit `timeout=`. The previous version's
-  pip upgrade had none, and an untimed child holding the only worker thread is
-  one of the few genuinely unbounded waits in the old code
-  (docs/CODE-AUDIT.md A6).
-
-Availability comes from yt-dlp's **structured** `availability` field, with the
-title placeholder only as a fallback. The previous version compared
-`title == '[Private Video]'` with a capitalisation that does not occur in the
-wild, so every private entry was silently filed as UNAVAILABLE (A13).
+`yt_dlp` is imported lazily inside `_ydl()`, which is also the single seam the
+tests patch to stay offline. Exactly one download runs at a time process-wide
+(`_download_slot`), and every subprocess call carries an explicit `timeout=`.
 """
 
 from __future__ import annotations
@@ -46,14 +28,11 @@ log = logging.getLogger("music.ingest")
 
 WATCH_URL = "https://www.youtube.com/watch?v={}"
 
-#: How long a single socket operation may stall before yt-dlp gives up. yt-dlp
-#: applies a 20s default of its own; setting it explicitly makes the value
-#: visible and tunable in one place, which is what A6 asked for as
-#: belt-and-braces around the paths that can wedge a worker.
+#: How long a single socket operation may stall before yt-dlp gives up.
 SOCKET_TIMEOUT = 20
 
-#: Minimum gap between heartbeats. A progress hook fires several times a
-#: second and a heartbeat is a database write; on an SD card that is not free.
+#: Minimum gap between heartbeats. A progress hook fires several times a second
+#: and a heartbeat is a database write.
 HEARTBEAT_INTERVAL = 30.0
 
 #: A pip install on an ARMv7 box with a cold wheel cache is slow but bounded.
@@ -67,13 +46,7 @@ _ID_CHUNK = 400
 
 @dataclass(frozen=True)
 class PlaylistEntry:
-    """One flat playlist entry, normalized.
-
-    Frozen because nothing downstream should be editing a listing in place, and
-    `duration` is an int rather than `int | None` on purpose: a None duration
-    reaching a `<` comparison is what raised TypeError at a distance in the
-    previous version (A14). Unknown is 0 here and everywhere.
-    """
+    """One flat playlist entry, normalized. Unknown duration is 0, never None."""
 
     video_id: str
     title: str
@@ -83,30 +56,24 @@ class PlaylistEntry:
     availability: str
 
 
-# --------------------------------------------------------------------------
-# Availability classification (A13)
-# --------------------------------------------------------------------------
+# --- Availability classification ---------------------------------------
 #
-# yt-dlp exposes `availability` on flat entries. It is the robust signal: the
-# title placeholders are YouTube InnerTube strings passed through verbatim, so
-# their exact casing is not ours to rely on — which is exactly how the previous
-# version's `title == '[Private Video]'` came to match nothing.
+# The structured `availability` field is the robust signal: the title
+# placeholders are InnerTube strings whose casing is not ours to rely on.
 
 _STRUCTURED_AVAILABILITY = {
     "public": Availability.AVAILABLE,
-    # An unlisted video downloads perfectly well once you hold its id, and a
-    # playlist entry is exactly that. It is AVAILABLE, not a third state.
+    # An unlisted video downloads fine once you hold its id, which a playlist
+    # entry is. AVAILABLE, not a third state.
     "unlisted": Availability.AVAILABLE,
     "private": Availability.PRIVATE,
-    # Age- or account-gated. We cannot fetch it, and the reason is access
-    # rather than removal, which is what PRIVATE means on the dashboard.
+    # Age- or account-gated: unfetchable for access reasons, not removal.
     "needs_auth": Availability.PRIVATE,
     "premium_only": Availability.UNAVAILABLE,
     "subscriber_only": Availability.UNAVAILABLE,
 }
 
-#: Compared case-folded, so `[Private video]`, `[Private Video]` and
-#: `[PRIVATE VIDEO]` all land in the same place.
+#: Compared case-folded; the casing of these strings varies in the wild.
 _TITLE_MARKERS = {
     "[private video]": Availability.PRIVATE,
     "[deleted video]": Availability.DELETED,
@@ -116,12 +83,9 @@ _TITLE_MARKERS = {
 def classify_availability(entry: dict) -> str:
     """Map one raw yt-dlp entry onto an `Availability` value.
 
-    Structured field first, title placeholder second, and only then a
-    conservative guess. The guess defaults to AVAILABLE: filing a downloadable
-    video as UNAVAILABLE means it is never attempted at all, whereas attempting
-    a dead one costs a single failed job that retries with backoff. The old
-    heuristic ("no duration means unavailable") had it the other way round and
-    would strand live streams, which legitimately report no duration.
+    The last-resort guess defaults to AVAILABLE: filing a downloadable video as
+    UNAVAILABLE means it is never attempted at all, whereas attempting a dead
+    one costs one failed job.
     """
     raw = str(entry.get("availability") or "").strip().lower()
     mapped = _STRUCTURED_AVAILABILITY.get(raw)
@@ -140,7 +104,7 @@ def classify_availability(entry: dict) -> str:
 
 
 def _coerce_duration(value: Any) -> int:
-    """Seconds as a non-negative int. Unknown is 0, never None (A14)."""
+    """Seconds as a non-negative int. Unknown is 0, never None."""
     if value is None:
         return 0
     try:
@@ -150,19 +114,14 @@ def _coerce_duration(value: Any) -> int:
     return seconds if seconds > 0 else 0
 
 
-# --------------------------------------------------------------------------
-# Listing
-# --------------------------------------------------------------------------
+# --- Listing -----------------------------------------------------------
 
 
 def list_playlist(url: str) -> list[PlaylistEntry]:
     """Fetch a playlist's entries without downloading anything.
 
-    Errors propagate. The previous version caught `DownloadError` and returned
-    an empty list, which turned "YouTube blocked us" into "the playlist is
-    empty" — indistinguishable in the log, and the reason A15's latent risk
-    would have been silent. Here the job engine records the failure and retries
-    with backoff.
+    Errors propagate rather than becoming an empty list, which would turn
+    "YouTube blocked us" into "the playlist is empty".
     """
     if not url:
         raise ValueError("a playlist URL is required")
@@ -171,12 +130,7 @@ def list_playlist(url: str) -> list[PlaylistEntry]:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        # 'in_playlist' asks the playlist extractor for flat entries and stops
-        # there — one round trip per page instead of one per video.
-        #
-        # Deliberately absent: `force_generic_extractor`. It is deprecated, and
-        # on the extract_info() path it was never read at all, so the previous
-        # version's copy of it was pure misdirection (A15).
+        # Flat entries: one round trip per page instead of one per video.
         "extract_flat": "in_playlist",
         "socket_timeout": SOCKET_TIMEOUT,
     }
@@ -196,9 +150,8 @@ def list_playlist(url: str) -> list[PlaylistEntry]:
         entries.append(
             PlaylistEntry(
                 video_id=video_id[:32],
-                # Truncated to what the columns hold. SQLite would store an
-                # over-long value happily and it would fail on any other
-                # backend, which is the worst of both worlds.
+                # Truncated to what the columns hold: SQLite would store an
+                # over-long value happily and fail on any other backend.
                 title=str(raw.get("title") or "").strip()[:512],
                 uploader=str(raw.get("uploader") or raw.get("channel") or "").strip()[
                     :255
@@ -217,12 +170,8 @@ def list_playlist(url: str) -> list[PlaylistEntry]:
 
 
 def _iter_entries(info: dict, *, depth: int = 0) -> Iterator[dict]:
-    """Yield flat video entries, descending into nested playlists.
-
-    A channel URL returns a playlist *of playlists*, and yt-dlp yields None for
-    entries it could not read at all. Both are handled once, here, rather than
-    by every caller.
-    """
+    """Yield flat video entries, descending into nested playlists — a channel
+    URL returns a playlist *of playlists*."""
     entries = info.get("entries")
     if entries is None:
         yield info  # a single-video URL
@@ -243,24 +192,18 @@ def sync_playlist(url: str) -> dict[str, int]:
     """Upsert every playlist entry into `YoutubeVideo`.
 
     Returns `{"seen", "added", "updated"}`, where **updated counts rows whose
-    content changed**, not rows touched — so a second run over an unchanged
-    playlist reports 0 and the number is worth reading.
-
-    `last_seen_at` is refreshed for every seen row in one statement rather than
-    by saving each row individually. N writes per sync for N unchanged rows is
-    precisely the kind of idle SD-card cost this rewrite exists to remove, and
-    freshness is not a content change.
+    content changed**, not rows touched — `last_seen_at` is refreshed for every
+    seen row in one statement, and freshness is not a content change.
     """
     entries = list_playlist(url)
 
-    # A playlist can legitimately contain the same video twice; a duplicate
+    # A playlist can legitimately contain the same video twice, and a duplicate
     # would make bulk_create raise on the primary key.
     unique: dict[str, PlaylistEntry] = {entry.video_id: entry for entry in entries}
 
     now = timezone.now()
     # Chunked because SQLite before 3.32 caps host parameters at 999, and
-    # Raspberry Pi OS Buster ships 3.27 — a 1000-video playlist would otherwise
-    # fail on exactly the deployment this is written for.
+    # Raspberry Pi OS Buster ships 3.27.
     existing: dict[str, YoutubeVideo] = {}
     for chunk in _chunks(list(unique), _ID_CHUNK):
         existing.update(YoutubeVideo.objects.in_bulk(chunk))
@@ -290,7 +233,7 @@ def sync_playlist(url: str) -> dict[str, int]:
             for field in changed:
                 setattr(row, field, values[field])
             # update_fields so a write against a row deleted underneath us
-            # raises rather than silently re-INSERTing it (A5).
+            # raises rather than silently re-INSERTing it.
             row.save(update_fields=[*changed, "updated_at"])
             updated += 1
 
@@ -316,9 +259,8 @@ def _chunks(items: list, size: int) -> Iterator[list]:
 def pending_downloads(*, limit: int | None = None):
     """Videos eligible for download, in playlist order.
 
-    `retry_at__isnull=True` is included on purpose. Both automated paths in the
-    previous version filtered on `retry_at <= now` alone, so a failed row that
-    never received a `retry_at` was invisible to every scheduler forever (A4).
+    `retry_at__isnull=True` is deliberate: filtering on `retry_at <= now` alone
+    makes a failed row that never received a `retry_at` invisible forever.
     """
     queryset = (
         YoutubeVideo.objects.filter(
@@ -330,9 +272,7 @@ def pending_downloads(*, limit: int | None = None):
     return queryset[:limit] if limit else queryset
 
 
-# --------------------------------------------------------------------------
-# Downloading
-# --------------------------------------------------------------------------
+# --- Downloading -------------------------------------------------------
 
 #: Held for the whole of one download+transcode. See `_download_slot`.
 _slot = threading.Lock()
@@ -346,16 +286,11 @@ def download_audio(
 ) -> Path:
     """Download one video's audio into `dest_dir`; return the file written.
 
-    The returned path is **the one yt-dlp reports**, not `<id>.mp3` assembled
-    from the output template. The previous version assembled it, and raised
-    FileNotFoundError whenever the postprocessor picked a different extension
-    or yt-dlp sanitised the name — the most common download failure in the
-    journal, and never actually a download problem.
-
-    `heartbeat` is called from yt-dlp's progress and postprocessor hooks, at
-    most once every `HEARTBEAT_INTERVAL` seconds, so a twenty-minute download
-    on a Pi 2 keeps extending its job lease instead of being reclaimed by the
-    reaper and run a second time.
+    The returned path is **the one yt-dlp reports**, never `<id>.mp3` assembled
+    from the output template: the postprocessor may pick a different extension
+    or yt-dlp may sanitise the name. `heartbeat` fires from yt-dlp's hooks at
+    most once every `HEARTBEAT_INTERVAL` seconds, so a long download keeps
+    extending its job lease instead of being reclaimed and run a second time.
     """
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -366,11 +301,9 @@ def download_audio(
     opts = {
         "format": "bestaudio/best",
         "outtmpl": str(dest_dir / f"{video.video_id}.%(ext)s"),
-        # AUDIO_FORMAT=native keeps YouTube's own stream and runs no
-        # postprocessor at all. That removes the single most expensive step on
-        # a Pi: libmp3lame is effectively single-threaded, and on a 900MHz
-        # Cortex-A7 encoding a four-minute track can take longer than fetching
-        # it. It also avoids a second lossy pass over already-lossy Opus.
+        # AUDIO_FORMAT=native keeps YouTube's stream and runs no postprocessor:
+        # single-threaded libmp3lame can take longer than the download itself
+        # on a Pi, and it is a second lossy pass over already-lossy Opus.
         "postprocessors": (
             [
                 {
@@ -385,9 +318,8 @@ def download_audio(
         # DASH audio comes as many small fragments; a few in flight keeps the
         # link busy instead of paying a round trip per fragment.
         "concurrent_fragment_downloads": settings.DOWNLOAD_CONCURRENT_FRAGMENTS,
-        # The previous version left this False, so every download streamed
-        # yt-dlp's progress bar into journald: thousands of lines per track,
-        # every one of them a write to the SD card.
+        # Without these the progress bar streams thousands of lines per track
+        # into journald, every one a write to the SD card.
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -398,8 +330,8 @@ def download_audio(
         "retries": 3,
         "fragment_retries": 3,
         "progress_hooks": [hook],
-        # ffmpeg is the slow half on this hardware and it runs *after* the last
-        # progress hook fires; without this the lease could expire mid-transcode.
+        # ffmpeg runs *after* the last progress hook fires; without this the
+        # lease could expire mid-transcode.
         "postprocessor_hooks": [hook],
     }
     if settings.FFMPEG_LOCATION:
@@ -422,10 +354,8 @@ def download_audio(
 def _downloaded_path(info: Any, dest_dir: Path, video_id: str) -> Path | None:
     """The file yt-dlp actually wrote.
 
-    Asked in order of authority: the per-download record — which postprocessors
-    update in place, so it names the finished .mp3 rather than the source
-    .webm — then the info dict, and only as a last resort the directory itself.
-    Never rebuilt from the output template; that assumption is what broke.
+    The per-download record first: postprocessors update it in place, so it
+    names the finished .mp3 rather than the source .webm.
     """
     candidates: list[str] = []
     if isinstance(info, dict):
@@ -443,9 +373,8 @@ def _downloaded_path(info: Any, dest_dir: Path, video_id: str) -> Path | None:
         if candidate and Path(candidate).exists():
             return Path(candidate)
 
-    # Nothing usable came back (an older yt-dlp, or an unexpected shape). Look
-    # at what landed instead of guessing at a name. Matching on the stem skips
-    # `<id>.mp3.part` and `<id>.f251.webm` leftovers for free.
+    # Nothing usable came back. Look at what landed rather than guess a name;
+    # matching on the stem skips `<id>.mp3.part` and `<id>.f251.webm` leftovers.
     matches = [
         path
         for path in dest_dir.iterdir()
@@ -462,9 +391,7 @@ def _downloaded_path(info: Any, dest_dir: Path, video_id: str) -> Path | None:
 def _heartbeat_hook(heartbeat: Callable[[], None] | None) -> Callable[[dict], None]:
     """Wrap `heartbeat` in a yt-dlp hook that fires at most once per interval.
 
-    yt-dlp calls progress hooks several times a second. Each heartbeat is a
-    database write, so an unthrottled hook turns one download into thousands of
-    pointless SD-card writes.
+    Progress hooks run several times a second; each heartbeat is a db write.
     """
     state = {"last": 0.0}
 
@@ -494,14 +421,9 @@ def _beat(heartbeat: Callable[[], None] | None) -> None:
 def _download_slot(heartbeat: Callable[[], None] | None):
     """Serialize downloads process-wide.
 
-    yt-dlp plus ffmpeg is the heaviest thing this box runs. Two at once on four
-    900MHz cores sharing 1GB is slower than two in sequence and risks swapping,
-    so the constraint is enforced here rather than by hoping nobody raises
-    WORKER_THREADS above 1.
-
-    The wait itself heartbeats: a worker blocked behind another download for
-    twenty minutes would otherwise have its lease expire, be reclaimed by the
-    reaper, and end up running the same download twice.
+    Two yt-dlp+ffmpeg runs at once are slower than two in sequence on this
+    hardware. The wait itself heartbeats: a worker blocked behind another
+    download would otherwise lose its lease and run the same download twice.
     """
     while not _slot.acquire(timeout=HEARTBEAT_INTERVAL):
         log.debug("waiting for the download slot")
@@ -512,19 +434,14 @@ def _download_slot(heartbeat: Callable[[], None] | None):
         _slot.release()
 
 
-# --------------------------------------------------------------------------
-# Version management
-# --------------------------------------------------------------------------
+# --- Version management ------------------------------------------------
 
 
 def ytdlp_version() -> str:
     """The yt-dlp version *this process* is using.
 
-    Read from the imported module rather than a subprocess, because that is the
-    code actually doing the work. After `upgrade_ytdlp` this keeps reporting
-    the old version until the service restarts — which is exactly why the
-    restart is required, and why it is the caller's call and not this
-    function's (A7).
+    From the imported module, not a subprocess: after `upgrade_ytdlp` this
+    keeps reporting the old version until the service restarts.
     """
     try:
         module = _ytdlp()
@@ -537,25 +454,15 @@ def ytdlp_version() -> str:
 def upgrade_ytdlp() -> str:
     """pip-install the latest yt-dlp; return the version now on disk.
 
-    Three deliberate choices:
-
-    * **An explicit timeout.** The previous version's pip call had none, and an
-      untimed child holding the only worker thread is one of the few genuinely
-      unbounded waits in the old code (A6).
-    * **`check=True`.** A failed upgrade must fail the job loudly rather than
-      report success and leave the operator wondering why nothing changed.
-    * **No restart.** The new package only takes effect in a fresh process, but
-      restarting from inside the job that is running kills it before its own
-      terminal state is persisted — the precise race in A7. The caller writes
-      its state first, then restarts.
+    Does not restart: the new package needs a fresh process, but restarting
+    from inside the running job would kill it before its terminal state is
+    persisted. The caller writes its state first, then restarts.
     """
     command = [
         settings.PIP_PATH, "install", "--upgrade",
-        # The Pi's root filesystem is an SD card; pip's wheel cache is pure
-        # cost there for a package upgraded a handful of times a year.
+        # The root filesystem is an SD card; a wheel cache is pure cost here.
         "--no-cache-dir",
-        # Saves pip an extra network round trip on a slow link, and stops it
-        # printing an upgrade notice into the job's captured output.
+        # Keeps pip's upgrade notice out of the job's captured output.
         "--disable-pip-version-check",
         "yt-dlp",
     ]
@@ -600,23 +507,16 @@ def _version_from_pip_output(text: str) -> str:
     match = _PIP_INSTALLED.search(text)
     if match:
         return match.group(1)
-    # "Requirement already satisfied" — nothing changed, so what is running is
-    # what is installed.
+    # "Requirement already satisfied": what is running is what is installed.
     return ytdlp_version()
 
 
-# --------------------------------------------------------------------------
-# The yt-dlp boundary
-# --------------------------------------------------------------------------
+# --- The yt-dlp boundary -----------------------------------------------
 
 
 def _ydl(opts: dict):
-    """Construct a YoutubeDL.
-
-    Every yt-dlp call in the app goes through this one function, for two
-    reasons: the import stays lazy, and the test suite has exactly one name to
-    patch in order to stay off the network.
-    """
+    """Construct a YoutubeDL. Every yt-dlp call goes through here, so the
+    import stays lazy and the tests have one name to patch."""
     return _ytdlp().YoutubeDL(opts)
 
 

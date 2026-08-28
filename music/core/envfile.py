@@ -1,21 +1,7 @@
-"""
-Read and rewrite the project `.env` from the running app.
+"""Read and rewrite the project `.env` from the running app.
 
-The previous version's writer (docs/CODE-AUDIT.md A8) had four defects, all of
-which end with a service that will not boot from an SD card:
-
-* `write_text` truncated in place — a power cut mid-save left `.env` empty;
-* no lock — two overlapping settings POSTs interleaved and lost one save;
-* it rewrote only the **first** line matching a key, while every reader
-  (python-dotenv, systemd) is last-line-wins, so a stale duplicate silently
-  shadowed the update;
-* it split values at `" #"` and wrote them back unquoted, truncating any value
-  that legitimately contained one.
-
-So: one module-level lock, `fileio.atomic_write_text` (temp + fsync + replace),
-**every** matching line replaced, and values quoted on write so a `#` or a space
-cannot come back as something else. Comments, blank lines and key order survive
-a rewrite, because this file is also read and hand-edited by a human.
+The file is also hand-edited, so comments, blank lines and key order survive a
+rewrite.
 """
 
 from __future__ import annotations
@@ -31,12 +17,11 @@ from music.core.fileio import atomic_write_text
 
 log = logging.getLogger("music.envfile")
 
-#: One process (enforced by core.runtime), so a threading lock is the whole
-#: mutual exclusion story for concurrent settings saves.
+#: Enough on its own: core.runtime guarantees a single process.
 _lock = threading.Lock()
 
-#: `KEY=`, `export KEY=`, with or without surrounding whitespace. A comment
-#: line cannot match: `#` is neither whitespace nor a leading identifier char.
+#: `KEY=` / `export KEY=`. A comment line cannot match, since `#` is neither
+#: whitespace nor a leading identifier character.
 _ASSIGNMENT = re.compile(r"^(\s*)(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 _KEY_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -50,16 +35,14 @@ def env_path() -> Path:
     return Path(override) if override else Path(settings.BASE_DIR) / ".env"
 
 
-# --------------------------------------------------------------------------
-# Reading
-# --------------------------------------------------------------------------
+# --- Reading --------------------------------------------------------------
 
 
 def _parse_value(raw: str) -> str:
     """Unwrap one layer of quoting, matching how python-dotenv reads the file.
 
-    Unquoted values lose a trailing ` # comment` (`.env.example` ships several);
-    quoted values keep every character, which is the A8 truncation fix.
+    Unquoted values lose a trailing ` # comment`; quoted values keep every
+    character.
     """
     raw = raw.strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
@@ -73,8 +56,7 @@ def _parse_value(raw: str) -> str:
 def read_values(path: str | Path | None = None) -> dict[str, str]:
     """Current `KEY -> value` pairs. Missing or unreadable file yields `{}`.
 
-    Last assignment wins, exactly like python-dotenv and systemd, so a file with
-    a duplicated key reports what the app will actually see.
+    Last assignment wins, exactly like python-dotenv and systemd.
     """
     target = Path(path) if path else env_path()
     try:
@@ -92,9 +74,7 @@ def read_values(path: str | Path | None = None) -> dict[str, str]:
     return values
 
 
-# --------------------------------------------------------------------------
-# Writing
-# --------------------------------------------------------------------------
+# --- Writing --------------------------------------------------------------
 
 
 def quote(value: str) -> str:
@@ -104,8 +84,7 @@ def quote(value: str) -> str:
     if _SAFE_BARE.match(value):
         return value
     if "'" not in value:
-        # Single quotes are literal for dotenv and systemd alike: no escapes to
-        # get wrong, which is what we want for paths and URLs.
+        # Single quotes are literal for dotenv and systemd alike: no escapes.
         return f"'{value}'"
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -115,16 +94,14 @@ def set_values(
 ) -> list[str]:
     """Apply `updates` to `.env`; return the keys whose stored value changed.
 
-    Existing assignments are rewritten in place (**all** of them, not just the
-    first), unknown keys are appended, and everything else — comments, blank
-    lines, ordering — is left byte-for-byte alone.
+    Every matching assignment is rewritten, not just the first: readers are
+    last-line-wins, so a leftover duplicate would shadow the update.
     """
     for key, value in updates.items():
         if not _KEY_NAME.match(key):
             raise ValueError(f"{key!r} is not a valid environment variable name")
         if "\n" in value or "\r" in value or "\0" in value:
-            # A newline here would inject an arbitrary second assignment into
-            # .env — including keys this form deliberately refuses to expose.
+            # A newline would inject a second, arbitrary assignment into .env.
             raise ValueError(f"{key}: value may not contain a line break")
 
     target = Path(path) if path else env_path()
@@ -147,8 +124,7 @@ def set_values(
                 out.append(line)
                 continue
             if key in written:
-                # A duplicate assignment further down the file would shadow the
-                # one we just rewrote. Drop it rather than leave a stale value.
+                # A later duplicate would shadow the line just rewritten.
                 log.info("dropping duplicate assignment of %s in %s", key, target)
                 continue
             indent, export = match.group(1), match.group(2) or ""

@@ -1,16 +1,7 @@
-"""
-Single-process guard.
+"""Single-process guard: an exclusive advisory lock on a file.
 
-The whole design — in-process worker wakeup, the SSE revision counter, keyed
-locks, requeue-orphans-at-boot — is correct only while exactly one process owns
-the database. The previous version stated that requirement in a docstring and
-enforced nothing, so a stray `--workers 2` would have silently produced double
-downloads and jobs stolen from a live sibling (docs/CODE-AUDIT.md A6).
-
-An exclusive advisory lock on a file makes the requirement checkable. It is
-best-effort: on a platform without file locking the guard degrades to a warning
-rather than blocking startup, because refusing to boot the user's live service
-over a missing syscall would be worse than the risk it guards.
+Best-effort — with no file-locking API available the guard warns rather than
+refusing to boot.
 """
 
 from __future__ import annotations

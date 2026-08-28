@@ -1,12 +1,7 @@
-"""
-Django settings for music_manager.
+"""Django settings for music_manager.
 
-Every value comes from the environment. Missing or malformed configuration
-raises ImproperlyConfigured with a message that says what to fix, rather than
-a bare KeyError traceback at import time.
-
-Numeric knobs are clamped here as well as validated in the settings form, so a
-hand-edited .env cannot brick the service (see docs/CODE-AUDIT.md A9).
+Every value comes from the environment. Malformed configuration raises
+ImproperlyConfigured; numeric knobs are clamped rather than rejected.
 """
 
 from pathlib import Path
@@ -76,9 +71,8 @@ TEMPLATES = [
 # Database
 # --------------------------------------------------------------------------
 #
-# WAL lets the request threads and the worker threads share one file safely.
-# busy_timeout is generous because SD/USB writes on a Pi can stall for
-# seconds under load; a blocked write is far better than SQLITE_BUSY.
+# WAL lets request threads and worker threads share one file. busy_timeout is
+# generous because SD/USB writes on a Pi can stall for seconds under load.
 
 DATABASES = {
     "default": {
@@ -95,14 +89,9 @@ DATABASES = {
                 "PRAGMA cache_size=-8000;"
             ),
         },
-        # Test against a real file rather than Django's default in-memory
-        # database. That default runs SQLite in shared-cache mode, whose
-        # locking differs from a file's: concurrent threads raise "database
-        # table is locked" where WAL on a file simply serializes them. Since
-        # this app's correctness rests on several threads writing one SQLite
-        # file — job claiming, the worker pool, SSE streams — the in-memory
-        # database would be testing something the app never does, and failing
-        # on it. The file is created and destroyed per run.
+        # A real file, not Django's in-memory default: that runs SQLite in
+        # shared-cache mode, where concurrent threads raise "database table is
+        # locked" instead of serializing as WAL on a file does.
         "TEST": {"NAME": str(BASE_DIR / ".test.sqlite3")},
     }
 }
@@ -136,8 +125,8 @@ LANGUAGE_CODE = "en-us"
 #: LIBRARY_ROOT/<Album Artist>/<Album>/<NN> - <Title>.<ext>
 LIBRARY_ROOT = env_path("LIBRARY_ROOT", required=True)
 
-#: Directories scanned for existing audio files. Colon- or comma-separated.
-#: These may overlap LIBRARY_ROOT; already-organized files are detected and skipped.
+#: Directories scanned for existing audio files. Colon- or comma-separated, and
+#: may overlap LIBRARY_ROOT — already-organized files are skipped.
 SCAN_ROOTS = [Path(p) for p in env_list("SCAN_ROOTS", default=[], separator=None)]
 
 #: Where freshly downloaded audio lands before it is identified and organized.
@@ -154,8 +143,7 @@ DUPLICATE_POLICY = env_str(
     choices=("report-only", "keep-best", "keep-both"),
 )
 
-#: Organizing never runs automatically unless this is on. Off means the app
-#: computes a manifest and waits for an explicit apply from the dashboard.
+#: Off: the app computes a manifest and waits for an apply from the dashboard.
 AUTO_ORGANIZE = env_bool("AUTO_ORGANIZE", default=False)
 
 
@@ -169,28 +157,16 @@ PIP_PATH = env_str("PIP_PATH", default="pip")
 FFMPEG_LOCATION = env_str("FFMPEG_LOCATION", default="")
 AUDIO_QUALITY = env_str("AUDIO_QUALITY", default="192")
 
-#: "native" (default) keeps YouTube's own audio stream — usually Opus in a WebM
-#: container, sometimes AAC in m4a — and never re-encodes.
-#: "mp3" re-encodes to MP3 at AUDIO_QUALITY.
-#:
-#: native is faster by a wide margin on a Pi. The download itself is network
-#: bound and takes what it takes; the transcode is CPU bound, libmp3lame is
-#: effectively single-threaded, and on a 900MHz Cortex-A7 it runs at a small
-#: multiple of realtime — so a four-minute song can spend longer being encoded
-#: than downloaded. Skipping it removes the dominant cost.
-#:
-#: It is also better audio: YouTube's Opus is already lossy, and MP3 is a second
-#: lossy pass over it. And the files are smaller.
-#:
-#: Choose "mp3" only for a player that genuinely cannot read Opus. Plex reads
-#: Opus, m4a and WebM; mutagen tags all of them.
+#: "native" (default) keeps YouTube's own stream — usually Opus — and never
+#: re-encodes: far faster on a Pi, and better audio than a second lossy pass.
+#: "mp3" re-encodes at AUDIO_QUALITY; pick it only for a player that cannot
+#: read Opus (Plex can).
 AUDIO_FORMAT = env_str(
     "AUDIO_FORMAT", default="native", choices=("native", "mp3")
 )
 
-#: DASH audio arrives as many small fragments, so fetching a few at once fills
-#: the pipe on a high-latency link. Kept modest: each one is a socket and a
-#: buffer, and the Pi has 1GB.
+#: DASH audio arrives as many small fragments; a few at once fills the pipe on
+#: a high-latency link. Each costs a socket and a buffer, so keep it modest.
 DOWNLOAD_CONCURRENT_FRAGMENTS = env_int(
     "DOWNLOAD_CONCURRENT_FRAGMENTS", default=4, minimum=1, maximum=16
 )
@@ -211,10 +187,19 @@ FPCALC_PATH = env_str("FPCALC_PATH", default="fpcalc")
 ACOUSTID_RATE_PER_SEC = env_float("ACOUSTID_RATE_PER_SEC", default=3.0, minimum=0.1)
 
 GEMINI_API_KEY = env_str("GEMINI_API_KEY", default="")
-GEMINI_MODEL = env_str("GEMINI_MODEL", default="gemini-flash-latest")
-#: Free tier is very limited. Default is deliberately slow.
-GEMINI_RATE_PER_MIN = env_float("GEMINI_RATE_PER_MIN", default=10.0, minimum=0.1)
-GEMINI_DAILY_BUDGET = env_int("GEMINI_DAILY_BUDGET", default=200, minimum=0)
+
+#: Pinned, not the "-latest" alias: Google hot-swaps those on every release, and
+#: the free-tier quota differs enormously between tiers — flash-lite allows
+#: 15 RPM / 500 requests per day, flash only 5 RPM / 20 per day. A silent swap
+#: onto a flash model would cut the daily budget by 25x.
+#: Both uses here are text-to-text (metadata inference and romanization), which
+#: is exactly what flash-lite is for.
+GEMINI_MODEL = env_str("GEMINI_MODEL", default="gemini-3.5-flash-lite")
+#: Kept under the flash-lite free-tier ceilings (15 RPM, 500 RPD) so the app
+#: throttles itself before Google does, leaving headroom for other users of the
+#: same key. Lower both if the key is shared.
+GEMINI_RATE_PER_MIN = env_float("GEMINI_RATE_PER_MIN", default=12.0, minimum=0.1)
+GEMINI_DAILY_BUDGET = env_int("GEMINI_DAILY_BUDGET", default=400, minimum=0)
 
 SHAZAM_ENABLED = env_bool("SHAZAM_ENABLED", default=True)
 SHAZAM_RATE_PER_MIN = env_float("SHAZAM_RATE_PER_MIN", default=20.0, minimum=0.1)
@@ -234,14 +219,13 @@ PROVIDER_TIMEOUT_SECONDS = env_float(
 # Worker / job engine
 # --------------------------------------------------------------------------
 #
-# On a Pi 2, one ffmpeg transcode already saturates a core. Two workers is the
-# practical ceiling; the default of 1 keeps the dashboard responsive.
+# On a Pi 2 one ffmpeg transcode saturates a core, so two workers is the
+# practical ceiling.
 
 WORKER_THREADS = env_int("WORKER_THREADS", default=1, minimum=1, maximum=8)
 
-#: Safety-net wakeup. Workers are event-driven, so this only catches work
-#: enqueued outside this process (a management command, say). It is NOT a
-#: poll interval in the old sense — an idle system does no queries between wakeups.
+#: NOT a poll interval — workers are event-driven and idle between wakeups.
+#: This only catches work enqueued outside this process (a management command).
 WORKER_IDLE_WAKE_SECONDS = env_float(
     "WORKER_IDLE_WAKE_SECONDS", default=300.0, minimum=5.0
 )
@@ -260,18 +244,10 @@ SYNC_INTERVAL_MINUTES = env_int("SYNC_INTERVAL_MINUTES", default=0, minimum=0)
 RESCAN_INTERVAL_MINUTES = env_int("RESCAN_INTERVAL_MINUTES", default=0, minimum=0)
 
 #: Upgrade yt-dlp on a schedule; 0 (default) means only the dashboard button.
-#:
-#: yt-dlp alone gets this. It is the one dependency that rots on someone else's
-#: timetable — YouTube changes and downloads simply stop — and the fix is always
-#: the same upgrade. Everything else is pinned in requirements.txt and moves
-#: when a human decides it should, because an unattended upgrade of a tagging or
-#: web library on a 24/7 Pi risks breaking a service to fix nothing.
-#:
 #: An upgrade restarts the service, so a run in the small hours is kindest.
 YTDLP_AUTO_UPDATE_HOURS = env_int("YTDLP_AUTO_UPDATE_HOURS", default=0, minimum=0)
 
-#: Retention for terminal Job rows; the reaper prunes older ones so the table
-#: cannot grow without bound on the SD card.
+#: Retention for terminal Job rows; the reaper prunes older ones.
 JOB_RETENTION_DAYS = env_int("JOB_RETENTION_DAYS", default=14, minimum=1)
 
 
@@ -279,13 +255,12 @@ JOB_RETENTION_DAYS = env_int("JOB_RETENTION_DAYS", default=14, minimum=1)
 # Web / SSE
 # --------------------------------------------------------------------------
 
-#: How long an SSE connection blocks before emitting a keepalive. Streams wait
-#: on an in-process condition variable, so this costs nothing while idle — it is
-#: not a poll interval. Longer is cheaper.
+#: How long an SSE connection blocks before emitting a keepalive. NOT a poll
+#: interval — streams wait on a condition variable, so idle costs nothing.
 SSE_KEEPALIVE_SECONDS = env_float("SSE_KEEPALIVE_SECONDS", default=25.0, minimum=1.0)
 
-#: Streams close themselves after this long so gunicorn threads always recycle
-#: (see docs/CODE-AUDIT.md A2). The browser reconnects automatically.
+#: Streams close themselves after this long so gunicorn threads recycle. The
+#: browser reconnects automatically.
 SSE_MAX_STREAM_SECONDS = env_float(
     "SSE_MAX_STREAM_SECONDS", default=600.0, minimum=30.0
 )
@@ -299,8 +274,8 @@ SYSTEMD_SERVICE = env_str("SYSTEMD_SERVICE", default="music_manager")
 # Logging
 # --------------------------------------------------------------------------
 #
-# Console only: journald already captures it, and the old dual FileHandler
-# setup wrote every record twice onto the SD card with no rotation.
+# Console only: journald captures it, and file handlers would write to the SD
+# card with no rotation.
 
 LOG_LEVEL = env_str(
     "LOG_LEVEL",

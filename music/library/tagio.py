@@ -1,35 +1,12 @@
-"""
-Reading and writing embedded tags.
+"""Reading and writing embedded tags, via mutagen.
 
-Two decisions here come straight from the audit, and both are about what it
-costs to touch a file on the Pi's USB disk.
+Every writer assembles the complete tag set on one mutagen object and calls
+`save()` exactly once: a tag write is a whole-file rewrite whenever the tag
+outgrows the padding, which on SD/USB storage costs an erase cycle.
 
-**One save, never two.** The previous version wrote the text frames with eyed3,
-saved, then fetched cover art, set it, and saved *again* — two complete
-rewrites of the same MP3 for one logical operation (docs/CODE-AUDIT.md A6
-describes the untimed cover fetch; the double write is its neighbour). A tag
-write is a whole-file rewrite whenever the new tag does not fit the padding, so
-on SD/USB storage the second save is not a rounding error, it is another few
-hundred milliseconds of blocking IO and another erase cycle on the card. Every
-writer below therefore assembles the complete tag set — text, compilation flag,
-MusicBrainz ids and cover art — on a single mutagen object and calls `save()`
-exactly once.
-
-**mutagen, imported lazily.** eyed3 is gone; mutagen handles MP3, MP4, FLAC and
-Ogg through one API, which is why the format branches below stay short. The
-import happens on first use rather than at module import so that a missing or
-half-installed mutagen — a real possibility on armv7, where wheels come from
-piwheels rather than PyPI — disables tagging and leaves scanning, the job queue
-and the dashboard running. It is the same rule the identification providers
-follow (`music/identify/base.py`): an optional dependency may take out its own
-feature and nothing else.
-
-Reading never raises. A library scan meets `.mp3` files that are truncated,
-that are HTML error pages with the wrong extension, or that some other program
-is writing right now; a scan that dies on one of them is a scan the user cannot
-finish. Unreadable means empty metadata plus one log line. Writing *does* raise
-`TagWriteError`, because the caller is usually about to move the file and needs
-to know the tags did not take.
+Reading never raises; a scan meets truncated and half-written files and must
+survive them. Writing raises `TagWriteError`, because the caller is usually
+about to move the file and needs to know the tags did not take.
 """
 
 from __future__ import annotations
@@ -52,17 +29,16 @@ __all__ = [
     "tagging_available",
 ]
 
-#: Containers mutagen exposes as MP4 atoms. Read natively rather than through
-#: the easy interface because EasyMP4 has no key for the compilation flag, and
-#: a compilation that loses its flag lands under the wrong artist in Plex.
+#: Read natively rather than through the easy interface: EasyMP4 has no key for
+#: the compilation flag, and a compilation that loses its flag lands under the
+#: wrong artist in Plex.
 _MP4_SUFFIXES = {".m4a", ".m4b", ".mp4"}
 _FLAC_SUFFIXES = {".flac"}
 _OGG_SUFFIXES = {".ogg", ".oga", ".opus"}
 _MP3_SUFFIXES = {".mp3"}
 
-#: The MusicBrainz recording id lives in a UFID frame owned by this string, and
-#: in the iTunes freeform atom below. Both are the conventions Picard writes,
-#: which is what makes the tags round-trip through other taggers.
+#: Picard's conventions, which is what makes the tags round-trip through other
+#: taggers.
 _MB_OWNER = "http://musicbrainz.org"
 _MP4_MB_RECORDING = "----:com.apple.iTunes:MusicBrainz Track Id"
 _MP4_MB_RELEASE = "----:com.apple.iTunes:MusicBrainz Album Id"
@@ -72,9 +48,7 @@ class TagWriteError(RuntimeError):
     """A tag write failed. Reading never raises; writing does, on purpose."""
 
 
-# --------------------------------------------------------------------------
-# Lazy mutagen
-# --------------------------------------------------------------------------
+# --- Lazy mutagen ------------------------------------------------------
 
 _mutagen_module = None
 _mutagen_checked = False
@@ -83,9 +57,8 @@ _mutagen_checked = False
 def _mutagen():
     """Import mutagen once, remembering failure.
 
-    Deliberately not a module-level import: this module is imported by the
-    scanner, which is imported by the job registry at worker startup. A broken
-    mutagen must disable tagging, not prevent the workers from booting.
+    Not module-level: a broken mutagen must disable tagging, not stop the
+    workers booting.
     """
     global _mutagen_module, _mutagen_checked
     if not _mutagen_checked:
@@ -108,18 +81,11 @@ def tagging_available() -> bool:
     return _mutagen() is not None
 
 
-# --------------------------------------------------------------------------
-# Reading
-# --------------------------------------------------------------------------
+# --- Reading -----------------------------------------------------------
 
 
 def read_tags(path: Path) -> TrackMetadata:
-    """Everything the file claims about itself. Empty metadata if it cannot say.
-
-    This is what the `tags` identification provider runs on, so the cost of a
-    miss is one wasted provider call, never an exception: an unreadable file
-    simply passes down the chain to AcoustID.
-    """
+    """Everything the file claims about itself. Empty metadata if it cannot say."""
     metadata, _duration, _bitrate = read_metadata(path)
     return metadata
 
@@ -127,25 +93,14 @@ def read_tags(path: Path) -> TrackMetadata:
 def read_audio_properties(path: Path) -> tuple[int, int]:
     """`(duration_seconds, bitrate_kbps)`. 0 means unknown — never None.
 
-    Zero rather than None because both values are compared against thresholds
-    all over this codebase, and a None reaching a comparison raises at a
-    distance (docs/CODE-AUDIT.md A14). The bitrate is kilobits per second, not
-    mutagen's bits per second: it is what the dashboard shows, what the
-    `keep-best` duplicate policy compares, and what fits `Track.bitrate`
-    without carrying three meaningless zeroes on every row.
+    Kilobits, not mutagen's bits per second.
     """
     _metadata, duration, bitrate = read_metadata(path)
     return duration, bitrate
 
 
 def read_metadata(path: Path) -> tuple[TrackMetadata, int, int]:
-    """Tags *and* audio properties from a single open.
-
-    The scanner needs both for every new file. Doing it in one pass halves the
-    seeks over a library of tens of thousands of files, which on a USB disk
-    hanging off a Pi 2 is the difference between a scan that finishes during
-    lunch and one that does not.
-    """
+    """Tags *and* audio properties from a single open, which halves the seeks."""
     audio, kind = _open(path)
     if audio is None:
         return TrackMetadata(), 0, 0
@@ -169,11 +124,7 @@ def read_metadata(path: Path) -> tuple[TrackMetadata, int, int]:
 
 
 def _open(path: Path):
-    """Open a file for reading. Returns `(audio_or_None, kind)`.
-
-    `kind` is "mp4" or "easy" and says how to read the tags off the object.
-    Never raises: every caller treats an unopenable file as untagged.
-    """
+    """Open for reading. Returns `(audio_or_None, kind)`, kind "mp4" or "easy"."""
     mutagen = _mutagen()
     if mutagen is None:
         return None, ""
@@ -235,9 +186,8 @@ def _read_mp4_tags(tags) -> TrackMetadata:
 # --- value coercion -------------------------------------------------------
 #
 # Tags are user data from twenty years of taggers: "3/12" track numbers,
-# "1994-05-01" dates, bytes where text was expected. Everything below turns
-# that into the model's vocabulary — text or a non-negative int — and never
-# raises, because one odd frame must not cost the file its other fields.
+# "1994-05-01" dates, bytes where text was expected. Nothing below raises — one
+# odd frame must not cost the file its other fields.
 
 
 def _first(audio, key: str) -> str:
@@ -287,24 +237,16 @@ def _positive_int(value) -> int:
     return number if number > 0 else 0
 
 
-# --------------------------------------------------------------------------
-# Writing
-# --------------------------------------------------------------------------
+# --- Writing -----------------------------------------------------------
 
 
 def write_tags(path: Path, meta: TrackMetadata, *, cover: bytes | None = None) -> None:
     """Write metadata and cover art into the file in a **single** save.
 
     Plex reads embedded tags in preference to filenames, so this is the write
-    that actually decides where a track appears in the library — the disc
-    number especially, which the filename convention only echoes
-    (see `music/plex.py`).
-
-    Empty values are left alone rather than blanked: a provider that could not
-    find the genre has no business deleting the genre the file already had. The
-    one exception is the compilation flag, which is *cleared* when False,
-    because a stale flag silently moves the whole album under "Various Artists"
-    in Plex — exactly the misfiling this pipeline exists to prevent.
+    that decides where a track appears. Empty values are left alone rather than
+    blanked; the exception is the compilation flag, which is *cleared* when
+    False, since a stale one moves the album under "Various Artists".
     """
     path = Path(path)
     if _mutagen() is None:
@@ -351,8 +293,8 @@ def _write_mp3(path: Path, meta: TrackMetadata, cover: bytes | None) -> None:
     tags = audio.tags
 
     def put(frame) -> None:
-        """Replace a frame rather than appending: ID3 allows duplicates, and a
-        second TIT2 is how a file ends up with two different titles."""
+        """Replace, not append: ID3 allows duplicate frames, and a second TIT2
+        is how a file ends up with two different titles."""
         tags.delall(frame.FrameID)
         tags.add(frame)
 
@@ -457,8 +399,6 @@ def _write_flac(path: Path, meta: TrackMetadata, cover: bytes | None) -> None:
     audio = FLAC(str(path))
     _apply_vorbis(audio, meta)
     if cover:
-        # clear_pictures + add_picture, then one save: replacing the art does
-        # not cost a second rewrite of the file.
         audio.clear_pictures()
         audio.add_picture(_flac_picture(cover))
     audio.save()
@@ -504,9 +444,7 @@ def _apply_vorbis(audio, meta: TrackMetadata) -> None:
 def _write_generic(path: Path, meta: TrackMetadata) -> None:
     """Best effort for containers with no first-class support here (wav, wma).
 
-    Each key is attempted separately and a rejection is not an error: a
-    container that cannot hold an album artist has not failed to write one, it
-    simply has nowhere to put it. Only a genuine save failure propagates.
+    A rejected key is not an error; only a save failure propagates.
     """
     mutagen = _mutagen()
     audio = mutagen.File(str(path), easy=True)

@@ -1,10 +1,7 @@
-"""
-Organization job handlers — computing and applying the Plex layout.
+"""Organization job handlers: planning and applying the Plex layout.
 
-Planning and applying are deliberately separate jobs. A plan is free and
-reversible; an apply moves thousands of real files. `AUTO_ORGANIZE` defaults to
-off, so the normal flow is: scan → identify → plan → *the user reviews the
-manifest* → apply.
+Planning and applying are separate jobs — a plan is free and reversible, an
+apply moves real files.
 """
 
 from __future__ import annotations

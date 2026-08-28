@@ -60,7 +60,13 @@ services:
       # only thing gating a provider is whether its key is present.
       IDENTIFY_CHAIN: "tags,acoustid,shazam,gemini"
       SHAZAM_ENABLED: "1"
-      GEMINI_DAILY_BUDGET: "50"      # deliberately small while testing
+
+      # Pinned, and passed through here so it can be changed without rebuilding
+      # the image. The free-tier quota differs 25x between tiers: flash-lite
+      # gets 15 RPM / 500 per day, flash only 5 RPM / 20 per day.
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.5-flash-lite}"
+      GEMINI_RATE_PER_MIN: "${GEMINI_RATE_PER_MIN:-12}"
+      GEMINI_DAILY_BUDGET: "${GEMINI_DAILY_BUDGET:-300}"
 
       # Passed through from your shell; unset keys just skip that provider.
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"

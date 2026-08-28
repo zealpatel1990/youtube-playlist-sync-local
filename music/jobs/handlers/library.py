@@ -59,15 +59,8 @@ def scan_root(job_obj) -> str:
 def rehash(job_obj) -> str:
     """Hash files that have none yet, a batch at a time.
 
-    Hashing reads every byte of every file, so this is never folded into a scan
-    — a scheduled rescan has to stay cheap enough to run on a Pi, which it
-    cannot be if it re-reads tens of gigabytes off a USB disk each time. It is
-    triggered only when something actually needs hashes (the duplicates page).
-
-    The job re-enqueues itself while work remains rather than looping, so each
-    batch gets its own lease and its own place in the queue: a large library is
-    hashed without one job holding a worker for an hour, and a restart resumes
-    from where it stopped instead of starting over.
+    This reads every byte of every file, so it is never folded into a scan. Each
+    batch re-enqueues the next, so a restart resumes instead of starting over.
     """
     from music.core.fileio import hash_file
 

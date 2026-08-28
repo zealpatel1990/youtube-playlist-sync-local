@@ -1,24 +1,4 @@
-"""
-Maintenance handlers.
-
-`maintenance.update_ytdlp` is the one that upgrades yt-dlp and restarts the
-service. The previous version got this wrong in a way worth restating, because
-the fix is the whole reason this handler looks the way it does
-(docs/CODE-AUDIT.md A7):
-
-It spawned a detached ``sh -c "sleep 3; sudo systemctl restart …"`` and then
-returned, leaving the framework to persist SUCCESS afterwards. Since SQLite's
-busy timeout is longer than three seconds, a contended write could still be in
-flight when the process was killed — so the job stayed RUNNING, boot recovery
-requeued it, and the upgrade ran again. The `Popen` result was never checked
-either, so a missing sudoers rule meant the restart silently never happened
-while the job cheerfully reported success.
-
-Here the terminal state is written *before* the restart is requested, and the
-restart is a synchronous ``systemctl --no-block`` that returns as soon as the
-job is queued with systemd — no sleep, no race — with ``sudo -n`` and
-``check=True`` so a missing sudoers rule fails loudly instead of silently.
-"""
+"""Maintenance handlers."""
 
 from __future__ import annotations
 
@@ -43,16 +23,15 @@ def update_ytdlp(job_obj) -> str:
     before = youtube.ytdlp_version()
     version = youtube.upgrade_ytdlp()
 
-    # Nothing changed — do not restart. This matters most for the scheduled
-    # run (YTDLP_AUTO_UPDATE_HOURS): pip reports success whether or not it had
-    # anything to do, so restarting unconditionally would bounce the service on
-    # every tick, killing whatever was downloading, to install nothing.
+    # pip reports success whether or not it had anything to do, so a version
+    # comparison is the only way to avoid restarting on every scheduled tick.
     if before and version and before == version:
         return f"yt-dlp is already {version}; no restart needed"
 
     message = f"yt-dlp upgraded {before or 'unknown'} -> {version}; restarting service"
 
-    # Persist the outcome BEFORE anything can kill this process.
+    # Persist the terminal state BEFORE the restart can kill this process,
+    # otherwise the job stays RUNNING and boot recovery re-runs the upgrade.
     Job.objects.filter(pk=job_obj.pk).update(
         state=JobState.SUCCEEDED,
         message=message,
@@ -63,9 +42,8 @@ def update_ytdlp(job_obj) -> str:
     if not settings.SYSTEMD_SERVICE:
         return f"yt-dlp upgraded to {version}; no SYSTEMD_SERVICE set, not restarting"
 
-    # Resolve to an absolute path: sudoers matches the command line literally,
-    # and the rule in deploy/sudoers-music-manager names full paths. The
-    # argument list below must stay byte-identical to that rule.
+    # Absolute path: sudoers matches the command line literally, so the argv
+    # below must stay byte-identical to deploy/sudoers-music-manager.
     systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
 
     try:

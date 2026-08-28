@@ -1,18 +1,10 @@
-"""
-Carry the old `playlist` app's rows over into `Track` + `YoutubeVideo`.
+"""Carry the old `playlist` app's rows over into `Track` + `YoutubeVideo`.
 
-The cutover unwires `playlist` from INSTALLED_APPS but leaves its tables in the
-database, so the download history is still there — this command copies it
-across so nothing is lost and nothing is re-downloaded.
+Read with raw SQL because by the time this runs the old app is no longer in
+INSTALLED_APPS and importing `playlist.models` would fail; the tables are probed
+via `sqlite_master`, so a fresh database is a no-op rather than an error.
 
-Read with raw SQL through `django.db.connection` rather than the old models,
-because by the time this runs the old app is no longer installed and importing
-`playlist.models` would fail. The tables are probed via `sqlite_master` (this
-project is SQLite-only, and the schema is not managed by any app that is still
-installed), so running against a fresh database is a no-op rather than an error.
-
-Idempotent: rows that already exist are counted and skipped, so a second run
-changes nothing. Dry run by default.
+Idempotent, and a dry run by default.
 """
 
 from __future__ import annotations
@@ -113,9 +105,8 @@ class Command(BaseCommand):
     def _rows(table: str) -> list[dict]:
         """`SELECT *` mapped onto dicts.
 
-        Named columns would be tidier, but the legacy schema went through four
-        migrations and a column that moved would turn this into a crash instead
-        of a missing value. Every read below uses `.get()` for the same reason.
+        Not named columns: the legacy schema moved through four migrations, and
+        a column that moved should be a missing value, not a crash.
         """
         with connection.cursor() as cursor:
             cursor.execute(f"SELECT * FROM {table}")  # noqa: S608 — fixed literal
@@ -162,8 +153,7 @@ class Command(BaseCommand):
                 video_id=video_id,
                 title=str(row.get("title") or "")[:512],
                 uploader=str(row.get("uploader") or "")[:255],
-                # NULL duration is stored as 0, never None: a None reaching a
-                # comparison is what raised TypeError at a distance before (A14).
+                # NULL duration becomes 0, never None.
                 duration=_positive_int(row.get("duration")),
                 url=str(row.get("url") or "")[:1024],
                 availability=_AVAILABILITY.get(
@@ -171,7 +161,7 @@ class Command(BaseCommand):
                     Availability.UNAVAILABLE,
                 ),
                 track=track,
-                # The legacy retry state belonged to downloading, which is what
+                # The legacy retry state belonged to downloading, which
                 # YoutubeVideo owns now.
                 fail_count=_positive_int(legacy_track.get("fail_count")),
                 retry_at=_parse_dt(legacy_track.get("retry_at")),
@@ -202,15 +192,11 @@ class Command(BaseCommand):
         track = Track(
             path=local_path,
             source=Source.YOUTUBE,
-            # MISSING is a state the scanner knows how to resolve; claiming a
-            # file exists when it does not would strand it instead.
-            #
-            # Everything else starts at DISCOVERED, including rows the legacy
-            # pipeline marked COMPLETED. Those files carry the tags the old
-            # tagger embedded, so the free, local `tags` provider re-derives
-            # their metadata in one pass with no network call. Asserting
-            # IDENTIFIED with empty metadata columns would instead file them
-            # all under Unknown Artist / Unknown Album.
+            # Everything on disk starts at DISCOVERED, including rows the
+            # legacy pipeline marked COMPLETED: the free `tags` provider
+            # re-derives their metadata from the tags the old tagger embedded,
+            # whereas asserting IDENTIFIED with empty metadata columns would
+            # file them all under Unknown Artist / Unknown Album.
             state=TrackState.DISCOVERED if on_disk else TrackState.MISSING,
             duration=_positive_int(video_row.get("duration")),
         )
@@ -218,10 +204,9 @@ class Command(BaseCommand):
             stat = path.stat()
             track.size_bytes = stat.st_size
             track.mtime = stat.st_mtime
-        # Deliberately NOT carrying md5_hash across into content_hash: the new
-        # field holds a sha1 (see core.fileio.hash_file), and mixing digests in
-        # one column would silently break duplicate detection. The scanner
-        # computes a real one on its next pass.
+        # md5_hash is deliberately NOT carried into content_hash: the new field
+        # holds a sha1, and mixing digests in one column would silently break
+        # duplicate detection. The scanner computes a real one on its next pass.
         track.save()
         counts["tracks_created"] += 1
         return track
@@ -230,9 +215,8 @@ class Command(BaseCommand):
     def _link_existing(video_id: str, track: Track | None, counts: dict) -> None:
         """Attach a track to an already-migrated video, if that is still free.
 
-        `YoutubeVideo.track` is a OneToOne, so a second video pointing at the
-        same file would raise. That happens when two legacy rows shared a
-        local_path — rare, but a re-run must not blow up on it.
+        `YoutubeVideo.track` is a OneToOne, so two legacy rows that shared a
+        local_path would otherwise raise.
         """
         if track is None:
             return
@@ -260,10 +244,8 @@ def _positive_int(value) -> int:
 def _parse_dt(value):
     """Parse a datetime out of a raw SQLite read.
 
-    Django's datetime converters only run for ORM queries, so a raw cursor
-    hands back the stored text — '2024-05-01 12:00:00.123456', naive. USE_TZ is
-    on and SQLite stores UTC, so the value is stamped UTC rather than localised
-    into whatever TIME_ZONE happens to be.
+    Django's converters only run for ORM queries, so a raw cursor hands back
+    naive stored text; SQLite stores UTC, so the value is stamped UTC.
     """
     if value in (None, ""):
         return None

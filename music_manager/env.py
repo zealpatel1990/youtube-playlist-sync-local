@@ -1,13 +1,8 @@
-"""
-Environment readers with validation and clamping.
+"""Environment readers with validation and clamping.
 
-Every reader raises ImproperlyConfigured with an actionable message rather than
-letting a ValueError or KeyError escape from settings import, because a failure
-here means the systemd unit crash-loops and the operator sees only a traceback.
-
-Numeric readers clamp rather than reject: a hand-edited .env with
-SSE_KEEPALIVE_SECONDS=0 should not be able to turn a loop into a spin
-(docs/CODE-AUDIT.md A9).
+Readers raise ImproperlyConfigured with an actionable message rather than let a
+traceback escape settings import; numeric readers clamp rather than reject, so a
+hand-edited .env cannot turn a loop into a spin.
 """
 
 from __future__ import annotations
@@ -25,8 +20,8 @@ _FALSE = {"0", "false", "no", "off", ""}
 def _raw(name: str) -> str | None:
     """Read a variable, stripping whitespace and one layer of stray quoting.
 
-    systemd's EnvironmentFile takes the whole line after '=', so values often
-    arrive with quotes the operator meant as shell syntax.
+    systemd's EnvironmentFile takes the whole line after '=', so values arrive
+    with the quotes the operator meant as shell syntax.
     """
     value = os.environ.get(name)
     if value is None:
@@ -88,9 +83,7 @@ def env_int(
     else:
         try:
             # float() first so "2.0" is accepted; int("2.0") would raise.
-            # OverflowError, not ValueError, is what int(inf) raises — without
-            # it here "inf" or "1e400" escapes settings import as a bare
-            # traceback, which is precisely what this module exists to prevent.
+            # int(inf) raises OverflowError, not ValueError, so catch both.
             parsed = int(_finite(name, float(value), value))
         except (ValueError, OverflowError):
             raise ImproperlyConfigured(
@@ -111,8 +104,8 @@ def env_float(
         parsed = default
     else:
         try:
-            # nan defeats clamping outright (every comparison against it is
-            # False), so a nan would sail past minimum= and land in a sleep().
+            # nan defeats clamping outright — every comparison against it is
+            # False — so it would sail past minimum= and land in a sleep().
             parsed = _finite(name, float(value), value)
         except ValueError:
             raise ImproperlyConfigured(
@@ -129,8 +122,8 @@ def env_list(
 ) -> list[str]:
     """Split on `separator`, or on both ',' and os.pathsep when separator is None.
 
-    Paths need the os.pathsep form because a Windows path contains ':' and a
-    POSIX music directory may legitimately contain ','.
+    Paths need the second form: a Windows path contains ':' and a POSIX
+    directory name may legitimately contain ','.
     """
     value = _raw(name)
     if value is None or value == "":

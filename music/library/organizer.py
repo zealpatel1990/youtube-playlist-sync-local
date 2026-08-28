@@ -1,29 +1,15 @@
-"""
-Planning and applying the Plex layout.
+"""Planning and applying the Plex layout.
 
-This is the only module in the app that moves the user's files, so its shape is
-dictated by what must never happen rather than by what it does:
+The only module that moves the user's files. Nothing is ever deleted — a losing
+duplicate is parked in `LIBRARY_ROOT/.duplicates/` and every move records
+`previous_path`. Nothing is written outside `LIBRARY_ROOT`: every destination is
+checked with `is_within` first, because destinations are computed from tag data
+that came off the internet and an artist name with `../..` only has to work once.
 
-* **Nothing is ever deleted.** Organizing is a move. A duplicate that loses is
-  parked in `LIBRARY_ROOT/.duplicates/`, not removed. Every move records
-  `previous_path`, so `revert_track` can put it back.
-* **Nothing is written outside `LIBRARY_ROOT`.** Every destination is checked
-  with `is_within` before a byte moves. `sanitize_component` already strips path
-  separators out of metadata, but a destination is computed from tag data that
-  came off the internet, and "an artist name with `../..` in it" is precisely
-  the kind of input that only has to work once.
-* **Planning and applying are separate.** A plan is a string in a column; an
-  apply is thousands of irreversible-looking file operations. `AUTO_ORGANIZE`
-  defaults to off so the normal flow puts a human between them.
-
-Path computation itself lives in `music/plex.py` and is pure. This module
-supplies the IO, the locking and the policy around it.
-
-Two audit findings are load-bearing here. Every write uses
-`save(update_fields=[...])` or a queryset `update()`, because a bare `save()`
-on a row deleted by a concurrent job silently re-INSERTs it
-(docs/CODE-AUDIT.md A5). And every file operation on a track happens under that
-track's key lock (`core/locks.py`), which is the other half of the same fix.
+Every write uses `save(update_fields=[...])` or a queryset `update()`, because a
+bare `save()` on a row a concurrent job deleted silently re-INSERTs it; every
+file operation runs under that track's key lock. Path computation is in
+`music/plex.py`.
 """
 
 from __future__ import annotations
@@ -58,18 +44,15 @@ __all__ = [
     "ensure_content_hash",
 ]
 
-#: Where a losing duplicate is parked. Dotted so the scanner walks straight
-#: past it and the files do not reappear as new tracks on the next pass.
+#: Where a losing duplicate is parked. Dotted so the scanner walks past it and
+#: the files do not reappear as new tracks on the next pass.
 DUPLICATES_DIRNAME = ".duplicates"
 
-#: Rows per page when sweeping the whole table. Keyset pagination rather than a
-#: cursor because applying changes `state`, which moves the row inside the very
-#: index the sweep is reading — bounded memory *and* no undefined iteration.
+#: Rows per page when sweeping the whole table — see `_paged`.
 PAGE_SIZE = 200
 
-#: Ceiling on the members reported for one duplicate group. A pathological
-#: library (the same file copied a thousand times) must not turn a report into
-#: an out-of-memory kill on a 1 GB box.
+#: Ceiling on the members reported for one duplicate group, so the same file
+#: copied a thousand times cannot turn a report into an out-of-memory kill.
 MAX_GROUP_MEMBERS = 50
 
 
@@ -77,25 +60,20 @@ class OrganizeError(RuntimeError):
     """A move was refused or failed. The file is left exactly where it was."""
 
 
-# --------------------------------------------------------------------------
-# Planning
-# --------------------------------------------------------------------------
+# --- Planning ----------------------------------------------------------
 
 
 def plan_track(track: Track) -> str:
     """Compute where this track belongs, store it, and return a human note.
 
-    Touches no file except for one `exists()` on the destination. The note is
-    what the dashboard shows in the manifest the user reviews before applying,
-    so it says what will happen in plain words rather than encoding a status.
+    The note is what the dashboard shows in the manifest before applying.
     """
     library_root = Path(settings.LIBRARY_ROOT)
     naming = plex.naming_from_track(track)
 
     if not track.has_core_metadata:
         # Refusing to plan is the point: a file with no title would be filed
-        # under "Unknown Artist/Unknown Album", and a thousand of those is a
-        # worse library than the unsorted one we started with.
+        # under "Unknown Artist/Unknown Album".
         return _save_plan(track, "", "not enough metadata yet; waiting for identification")
 
     destination = plex.build_path(library_root, naming)
@@ -120,12 +98,8 @@ def plan_all(
     states: Sequence[str] = (TrackState.IDENTIFIED,),
     heartbeat: Callable[[], None] | None = None,
 ) -> dict[str, int]:
-    """Plan every track in `states`. Returns counts, not a manifest.
-
-    The manifest lives in the `planned_path`/`plan_note` columns; returning it
-    would mean holding the whole library in memory to hand it to a caller that
-    is going to page through the table anyway.
-    """
+    """Plan every track in `states`. Counts only; the manifest lives in the
+    `planned_path`/`plan_note` columns."""
     stats = {"planned": 0, "in_place": 0, "skipped": 0, "errors": 0}
     processed = 0
 
@@ -140,7 +114,6 @@ def plan_all(
             stats["errors"] += 1
             continue
 
-        # Classified from what was stored, not by parsing the note back.
         if not track.planned_path:
             stats["skipped"] += 1
         elif track.planned_path == track.path:
@@ -169,24 +142,17 @@ def _conflict_note() -> str:
     return "a file is already there; report-only, so nothing will move"
 
 
-# --------------------------------------------------------------------------
-# Applying
-# --------------------------------------------------------------------------
+# --- Applying ----------------------------------------------------------
 
 
 def apply_track(track: Track, *, write_tags: bool = True) -> Path:
     """Move one track into place. Returns where the file actually ended up.
 
-    Held under the track's key lock for the whole operation — read, tag write,
-    move and row update — because the alternative is the exact race the audit
-    describes: another job deleting or re-downloading this track between our
-    read and our write (docs/CODE-AUDIT.md A5).
-
-    Tags are written *before* the move, not after. Within one filesystem the
-    move is a rename, so writing first means one rewrite of the file rather
-    than a rewrite of a file we have just finished writing somewhere else; and
-    if the tag write fails, it fails while the file is still at its original,
-    recorded location.
+    Held under the track's key lock for the whole operation, so another job
+    cannot delete or re-download this track between our read and our write.
+    Tags are written *before* the move: within one filesystem the move is a
+    rename, so writing first is one rewrite rather than two, and a failed tag
+    write fails while the file is still at its recorded location.
     """
     library_root = Path(settings.LIBRARY_ROOT)
 
@@ -194,8 +160,7 @@ def apply_track(track: Track, *, write_tags: bool = True) -> Path:
         try:
             track.refresh_from_db()
         except Track.DoesNotExist as exc:
-            # Deleted underneath us. Re-creating it here is precisely the
-            # resurrection bug A5 describes, so this stops.
+            # Deleted underneath us; re-creating it here would resurrect it.
             raise OrganizeError(f"track {track.pk} was deleted while it waited") from exc
 
         source_path = Path(track.path)
@@ -204,9 +169,7 @@ def apply_track(track: Track, *, write_tags: bool = True) -> Path:
             raise OrganizeError(f"file has gone missing: {track.path}")
 
         if not track.planned_path and not track.has_core_metadata:
-            # Without a reviewed plan and without metadata, the computed
-            # destination would be "Unknown Artist/Unknown Album/…". Filing
-            # unidentified files there is how a library becomes unsalvageable.
+            # The computed destination would be "Unknown Artist/Unknown Album/…".
             raise OrganizeError(
                 f"refusing to organize {track.path}: no plan, and not enough "
                 f"metadata to compute one"
@@ -280,8 +243,8 @@ def apply_all(heartbeat: Callable[[], None] | None = None) -> dict[str, int]:
         try:
             destination = apply_track(track)
         except OrganizeError as exc:
-            # An expected refusal — a missing file, a destination outside the
-            # root. Logged at warning, counted, and the sweep continues.
+            # An expected refusal: a missing file, or a destination outside the
+            # root. Counted, and the sweep continues.
             log.warning("skipped %s: %s", track.path, exc)
             stats["errors"] += 1
             continue
@@ -305,10 +268,8 @@ def apply_all(heartbeat: Callable[[], None] | None = None) -> dict[str, int]:
 def revert_track(track: Track) -> Path:
     """Move a track back to where it came from. The undo for `apply_track`.
 
-    `planned_path` is left pointing at the organized location so re-applying is
-    one click, and `previous_path` is cleared: there is nothing further back to
-    go to, and leaving a stale value there would make a second revert move the
-    file somewhere it has never been.
+    `previous_path` is cleared, or a second revert would move the file
+    somewhere it has never been.
     """
     with track_locks.acquire(f"track:{track.pk}"):
         try:
@@ -344,30 +305,23 @@ def revert_track(track: Track) -> Path:
         return restored
 
 
-# --------------------------------------------------------------------------
-# Duplicates
-# --------------------------------------------------------------------------
+# --- Duplicates --------------------------------------------------------
 
 
 def find_duplicates() -> list[list[Track]]:
     """Groups of tracks that are probably the same recording.
 
-    Two independent groupings, because they catch different things: identical
-    bytes (`content_hash`) finds the same file copied into both source
-    libraries, while `(album artist, album, track number, title)` finds the same
-    recording ripped twice at different bitrates — which is the case the
-    `keep-best` policy exists for and which no hash will ever match.
-
-    `content_hash` is populated lazily by the `library.rehash` job, not by the
-    scan: hashing is a full read of every file, and doing it on every scan would
-    turn a cheap directory walk into hours of disk IO.
+    Two groupings: identical bytes (`content_hash`, populated lazily by the
+    `library.rehash` job) finds the same file copied twice, while `(album
+    artist, album, track number, title)` finds the same recording ripped at two
+    bitrates, which no hash will ever match.
     """
     groups: list[list[Track]] = []
     seen: set[frozenset[int]] = set()
 
     # .order_by() is not decoration: Track.Meta sets a default ordering, and
     # Django adds ordering columns to the GROUP BY, which would make every row
-    # its own group and this function silently return nothing.
+    # its own group and this function silently find nothing.
     hashes = (
         Track.objects.exclude(content_hash="")
         .exclude(state=TrackState.MISSING)
@@ -424,12 +378,7 @@ def _add_group(groups: list[list[Track]], seen: set[frozenset[int]], queryset) -
 
 
 def ensure_content_hash(track: Track) -> str:
-    """Hash the file if it has not been hashed. Returns the digest, or "".
-
-    Separate from the scan on purpose — see `find_duplicates`. Offered here so
-    a duplicate-resolution job can fill in the hashes for the handful of tracks
-    it is actually comparing rather than for the whole library.
-    """
+    """Hash the file if it has not been hashed. Returns the digest, or ""."""
     if track.content_hash:
         return track.content_hash
     digest = hash_file(track.path)
@@ -439,19 +388,15 @@ def ensure_content_hash(track: Track) -> str:
     return digest
 
 
-# --------------------------------------------------------------------------
-# Internals
-# --------------------------------------------------------------------------
+# --- Internals ---------------------------------------------------------
 
 
 def _paged(queryset):
     """Stream a queryset in keyset-paginated pages.
 
-    Not `.iterator()`: the callers here *write* to the rows they are reading,
-    changing indexed columns, and SQLite explicitly leaves it undefined whether
-    a row modified during an open SELECT is revisited or skipped. Paging by
-    `id > last` costs one small query per page and is immune to that, while
-    holding only one page in memory.
+    Not `.iterator()`: the callers write to the rows they are reading, and
+    SQLite leaves it undefined whether a row modified during an open SELECT is
+    revisited or skipped. Paging by `id > last` is immune to that.
     """
     last_id = 0
     while True:
@@ -464,11 +409,8 @@ def _paged(queryset):
 
 
 def _resolve_conflict(track: Track, source_path: Path, destination: Path) -> Path | None:
-    """Apply `DUPLICATE_POLICY` to an occupied destination.
-
-    Returns the path to move to, or None when the policy says leave this file
-    alone (in which case the track's note has already been updated).
-    """
+    """Apply `DUPLICATE_POLICY` to an occupied destination. Returns the path to
+    move to, or None when the policy says leave this file alone."""
     if not destination.exists():
         return destination
 
@@ -484,8 +426,7 @@ def _resolve_conflict(track: Track, source_path: Path, destination: Path) -> Pat
             if _demote(destination) is None:
                 return _refuse(track, "could not move the existing file aside")
             return destination
-        # Ours is the lesser copy: park it rather than leave two files claiming
-        # the same place, and never delete it.
+        # Ours is the lesser copy: park it, never delete it.
         parked = _demote(source_path, track=track)
         if parked is None:
             return _refuse(track, "could not park this duplicate")
@@ -507,13 +448,8 @@ def _refuse(track: Track, note: str) -> None:
 
 
 def _demote(path: Path, *, track: Track | None = None) -> Path | None:
-    """Park a losing duplicate under `LIBRARY_ROOT/.duplicates/`.
-
-    Moved, never deleted — the whole duplicate policy is reversible because of
-    this. If a Track row owns the file, it is updated to follow it; if that row
-    is busy in another job we leave the file alone entirely rather than move a
-    file out from under a running job.
-    """
+    """Park a losing duplicate under `LIBRARY_ROOT/.duplicates/`. A Track row
+    that owns the file follows it; if that row is busy, nothing moves."""
     library_root = Path(settings.LIBRARY_ROOT)
     try:
         relative = path.resolve().relative_to(library_root.resolve())
@@ -530,9 +466,8 @@ def _demote(path: Path, *, track: Track | None = None) -> Path | None:
         owner = Track.objects.filter(path=str(path)).first()
 
     if owner is not None and track is None:
-        # A different track's file: take its lock without blocking. Failing to
-        # get it means another job is working on that track right now, and
-        # moving its file would be exactly the race we lock to prevent.
+        # A different track's file: take its lock without blocking. Failing
+        # means another job is working on that track right now.
         with track_locks.acquire(f"track:{owner.pk}", timeout=0) as acquired:
             if not acquired:
                 log.info("%s is busy; not parking its file", owner.path)
@@ -563,12 +498,7 @@ def _park(owner: Track | None, path: Path, target: Path) -> Path | None:
 
 
 def _bitrate_at(path: Path) -> int:
-    """Bitrate of the file already at a destination, in kbps.
-
-    Prefers the Track row — `path` is unique and indexed, so it is one lookup
-    against a value the scan already read — and only opens the file when no row
-    owns it.
-    """
+    """Bitrate of the file at a destination, in kbps. Prefers the Track row."""
     row = Track.objects.filter(path=str(path)).values("bitrate").first()
     if row is not None and row["bitrate"]:
         return row["bitrate"]
@@ -578,10 +508,7 @@ def _bitrate_at(path: Path) -> int:
 def _write_tags(track: Track, path: Path) -> None:
     """Write the track's metadata into the file, tolerating a failure.
 
-    A failed tag write must not abort the move: the move is the reversible,
-    recorded operation, and tags can be rewritten later by another pass. The
-    failure is recorded on the row so it is visible from the dashboard rather
-    than only in the journal (docs/CODE-AUDIT.md A3).
+    A failed tag write must not abort the move; it is recorded on the row.
     """
     try:
         tagio.write_tags(path, _metadata_from(track))
@@ -592,12 +519,10 @@ def _write_tags(track: Track, path: Path) -> None:
 
 
 def _metadata_from(track: Track) -> TrackMetadata:
-    """The Track's own view of itself, in the identification package's currency.
+    """The Track's own view of itself, as a TrackMetadata.
 
-    `effective_album_artist()` rather than the raw column: on a compilation the
-    album artist tag must read "Various Artists" while the artist tag keeps the
-    real performer, which is what makes Plex file the album in one place and
-    still attribute each track correctly.
+    `effective_album_artist()`, not the raw column: on a compilation that tag
+    must read "Various Artists" while `artist` keeps the real performer.
     """
     return TrackMetadata(
         title=track.title,
@@ -625,16 +550,10 @@ def _record_move(
 ) -> None:
     """Persist the outcome of a move in one write.
 
-    `previous` and `planned` are passed explicitly rather than inferred from
-    the state, because the three callers want three different things: a move
-    records where to revert to, a revert clears that and points the plan back
-    at the organized path, and a parked duplicate records both so the user can
-    undo the duplicate policy as easily as anything else.
-
-    Size and mtime are re-read from the file that now exists. Skipping that is
-    what would make every organized track look "changed" to the next scan — a
-    rescan would re-read its tags, reset it to DISCOVERED and send it round the
-    identification chain again, on every scan, forever.
+    Size and mtime are re-read from the file that now exists. Skipping that
+    makes every organized track look "changed" to the next scan, which re-reads
+    its tags, resets it to DISCOVERED and sends it round the identification
+    chain again — on every scan, forever.
     """
     track.path = str(destination)
     track.previous_path = previous
@@ -690,10 +609,7 @@ def _flag_missing(track: Track) -> None:
 def _prune_from(directory: Path) -> None:
     """Remove directories a move emptied, never climbing past a known root.
 
-    The stop point comes from settings rather than the ScanRoot table so that a
-    sweep of thousands of moves does not run a query per move. A path under no
-    configured root is simply not pruned: leaving an empty directory is a
-    cosmetic problem, and removing one we cannot place is not.
+    Roots come from settings, not the ScanRoot table: no query per move.
     """
     roots = [
         Path(settings.LIBRARY_ROOT),

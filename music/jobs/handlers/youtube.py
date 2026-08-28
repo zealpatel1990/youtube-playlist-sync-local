@@ -106,8 +106,7 @@ def download(job_obj) -> str:
                 "mtime": path.stat().st_mtime,
                 "duration": duration or video.duration,
                 "bitrate": bitrate,
-                # The video title is the only metadata we have at this point;
-                # it becomes the hint the identification chain works from.
+                # The only metadata we have yet; the identify chain hints off it.
                 "title": video.title,
             },
         )

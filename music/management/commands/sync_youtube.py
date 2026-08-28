@@ -1,12 +1,7 @@
-"""
-Sync the YouTube playlist into YoutubeVideo rows, and queue what needs downloading.
+"""Sync the YouTube playlist into YoutubeVideo rows, and queue downloads.
 
-Downloads are **queued, not run here**. The previous version's command
-downloaded and tagged inline with its own `time.sleep(5)` between videos, so a
-batch run competed with the live service for yt-dlp, ffmpeg and the database
-while duplicating logic the job handlers already own. Enqueuing means one
-downloader, one at a time, with leases and retries — whether the work was
-started from cron, the dashboard, or here.
+Downloads are **queued, not run here**, so cron, the dashboard and this command
+all go through one downloader with leases and retries.
 """
 
 from __future__ import annotations
@@ -82,9 +77,8 @@ class Command(BaseCommand):
         if not queued:
             self.stdout.write("nothing to download: every available video has a track.")
             return
-        # "or already pending", not "queued": enqueue is deduped against active
-        # jobs, so re-running this command absorbs into the existing ones rather
-        # than stacking a second copy of the same download.
+        # "or already pending": enqueue is deduped against active jobs, so
+        # re-running absorbs into the existing ones.
         self.stdout.write(
             self.style.SUCCESS(
                 f"{queued} download job(s) queued or already pending. The running "

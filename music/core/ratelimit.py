@@ -1,14 +1,4 @@
-"""
-Token-bucket rate limiting and a daily budget.
-
-The previous version had neither, which mattered most for Gemini: a free-tier
-key with a very low quota was called once per unidentified track with no pacing
-and no ceiling, so a library sweep would exhaust the day's quota in minutes and
-then fail every remaining track.
-
-`DailyBudget` is the harder guarantee — a limiter only paces requests, it does
-not stop you making 5,000 of them over a day.
-"""
+"""Token-bucket rate limiting and a daily call budget."""
 
 from __future__ import annotations
 
@@ -58,7 +48,7 @@ class RateLimiter:
 class DailyBudget:
     """A hard call ceiling that resets at local midnight.
 
-    Unlike a rate limiter this cannot be waited out — once spent, `consume`
+    Unlike a rate limiter this cannot be waited out: once spent, `consume`
     returns False for the rest of the day and the caller must degrade.
     """
 

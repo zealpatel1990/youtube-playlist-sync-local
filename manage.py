@@ -10,8 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 try:
     from dotenv import load_dotenv
 
-    # override=False so a real environment variable (from systemd, or an
-    # explicit export in a shell) always beats the file.
+    # override=False so a real environment variable always beats the file.
     load_dotenv(BASE_DIR / ".env", override=False)
 except ImportError:
     pass
@@ -20,15 +19,11 @@ except ImportError:
 def main() -> None:
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "music_manager.settings")
 
-    # A management command runs in its own process and must never start a
-    # second worker pool competing with the live service for jobs — with one
-    # exception. `runserver` IS the development server, and the whole design is
-    # that workers live inside the web process, so disabling them there would
-    # leave a dashboard whose buttons queue work nothing ever runs.
-    #
-    # This only gates the worker threads. Job handlers are registered in
-    # MusicConfig.ready() regardless, because anything that enqueues needs the
-    # registry whether or not this process will run the work.
+    # A management command must not start a second worker pool competing with
+    # the live service. `runserver` is exempt: workers live inside the web
+    # process, so disabling them there would leave a dashboard that runs
+    # nothing. Only the threads are gated — handlers still register in
+    # MusicConfig.ready(), since enqueuing needs the registry either way.
     if "runserver" not in sys.argv:
         os.environ.setdefault("MUSIC_MANAGER_DISABLE_WORKERS", "1")
     try:

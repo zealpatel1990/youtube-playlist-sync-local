@@ -1,24 +1,15 @@
-"""
-Plex music layout rules.
-
-Pure functions — no IO, no ORM, no settings beyond what is passed in — so the
-whole naming policy is exhaustively unit-testable, which matters because
-getting it wrong means moving thousands of files into the wrong shape.
+"""Plex music layout rules. Pure functions, so the naming policy is testable.
 
 Reference: https://support.plex.tv/articles/200265296-adding-music-media-from-folders/
 
     Music/Artist/Album/TrackNumber - TrackName.ext
     Music/Various Artists/Album/TrackNumber - TrackName.ext
 
-Multi-disc albums prepend the disc number to the track number, so disc 3
-track 2 becomes `302 - Track Name.mp3`.
-
-One judgement call worth stating: we prepend the disc number only when it is
-2 or higher. A single-disc rip that happens to tag `disc=1` would otherwise
-become `101 - …`, which is worse than `01 - …` and is not what the guide
-intends. Plex reads the disc number from the embedded tag regardless — and the
-article is explicit that the tag is what must be correct — so the filename
-convention is the secondary signal here, not the authority.
+Multi-disc albums prepend the disc number, so disc 3 track 2 becomes `302 - …`.
+The disc number is prepended only when it is 2 or higher: a single-disc rip
+that happens to tag `disc=1` would otherwise become `101 - …` rather than
+`01 - …`. Plex reads the disc number from the embedded tag regardless, so the
+filename convention is the secondary signal here, not the authority.
 """
 
 from __future__ import annotations
@@ -53,12 +44,8 @@ class TrackNaming:
 
 
 def resolve_album_artist(naming: TrackNaming) -> str:
-    """The artist folder name.
-
-    Compilations go to `Various Artists` per the guide; the per-track `artist`
-    tag still carries the real performer, which is what Plex reads to attribute
-    individual tracks.
-    """
+    """The artist folder name. Compilations go to `Various Artists`; the
+    per-track `artist` tag still carries the real performer."""
     if naming.is_compilation:
         return VARIOUS_ARTISTS
     for candidate in (naming.album_artist, naming.artist):
@@ -130,9 +117,8 @@ def is_already_organized(current_path: str | Path, library_root: str | Path,
                          naming: TrackNaming) -> bool:
     """True when the file already sits at its computed destination.
 
-    Compared case-insensitively on the relative part, because the HDD may be
-    mounted from a case-insensitive filesystem and a spurious "move" that only
-    changes case is both pointless and, on some filesystems, destructive.
+    Case-insensitive: on a case-insensitive filesystem a "move" that only
+    changes case is pointless and sometimes destructive.
     """
     try:
         current_rel = Path(current_path).resolve().relative_to(Path(library_root).resolve())

@@ -1,17 +1,8 @@
-"""
-Run the identification chain against a single file and print what it found.
+"""Run the identification chain against a single file and print what it found.
 
-This replaces `test_tagger.py` at the repository root, which called
-`django.setup()` and ran a live Shazam/Gemini pass **at import**, with no
-`__main__` guard. Its filename matched unittest's `test*.py` discovery pattern
-and discovery imports modules before the test database exists, so a bare
-`python manage.py test` recognized real audio, wrote to the real db.sqlite3 and
-renamed real files (docs/CODE-AUDIT.md A10).
-
-A management command is out of discovery's reach entirely. As a second belt,
-the work runs inside a transaction that is always rolled back: this is a
-diagnostic, and running a diagnostic against the live library must not change
-it. To actually apply identification, enqueue the `identify.track` job.
+The work runs inside a transaction that is always rolled back: a diagnostic run
+against the live library must not change it. To apply identification for real,
+enqueue the `identify.track` job.
 """
 
 from __future__ import annotations
@@ -49,8 +40,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
-        # Late import: the providers pull in shazamio / pyacoustid, and a
-        # missing one must not break `manage.py help`.
+        # Late import: a missing provider dependency must not break
+        # `manage.py help`, which imports every command module.
         from music.identify import identify
 
         try:
@@ -85,8 +76,8 @@ class Command(BaseCommand):
         if existing is not None:
             return existing
 
-        # Created inside the transaction that this command always rolls back,
-        # so the providers get a real, saveable row without leaving one behind.
+        # Created inside the always-rolled-back transaction, so the providers
+        # get a real, saveable row without leaving one behind.
         self.stdout.write("no Track row for that path; using a temporary one")
         return Track.objects.create(path=str(path))
 
@@ -94,11 +85,8 @@ class Command(BaseCommand):
     def _context_for(track: Track):
         """Assemble the same context the `identify.track` job builds.
 
-        Deliberately identical rather than minimal: a diagnostic that fed the
-        chain less than the pipeline does would answer a question nobody asked.
-        The YouTube title in particular is the only thing Gemini has to work
-        with, so omitting it would make this command disagree with production
-        on exactly the tracks it is most often run against.
+        Identical rather than minimal, or this command would disagree with
+        production — the YouTube title is all Gemini has to work with.
         """
         from music.identify import IdentifyContext
         from music.library import tagio
@@ -114,11 +102,7 @@ class Command(BaseCommand):
         )
 
     def _write_result(self, result) -> None:
-        """Print whatever the chain returned, without assuming its shape.
-
-        The chain's metadata type is free to grow fields; a command that hard
-        codes them would quietly stop printing the new ones.
-        """
+        """Print whatever the chain returned, without assuming its shape."""
         if result is None:
             self.stdout.write(self.style.WARNING("no provider returned a match"))
             return

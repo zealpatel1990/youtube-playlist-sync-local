@@ -62,6 +62,43 @@ Two remain configurable rather than decided, because they are yours to choose pe
 - **Merged root** is `LIBRARY_ROOT` in `.env`. Pointing it at `/media/pi/500gb hdd/Music` absorbs everything in place; pointing it at a fresh `Plex_Music/` builds the new tree while leaving both sources untouched until you have verified it. The fresh root is safer and costs disk headroom — worth it for the first run.
 - **Duplicate policy** is `DUPLICATE_POLICY`, defaulting to `report-only` (find them, change nothing). `keep-best` keeps the highest bitrate and moves the rest to `LIBRARY_ROOT/.duplicates/`; `keep-both` disambiguates with a suffix. Nothing is ever deleted under any policy.
 
+## English metadata for a non-English library
+
+Most of this library is Hindi, Gujarati and Punjabi, and Plex search only finds
+what is in the tags. A track tagged `सामी सामी` cannot be found by typing
+"Saami Saami", so the primary tags need to be in Latin script.
+
+Transliteration is the obvious answer and the wrong one. Measured on this
+library's actual strings:
+
+| Original | `unidecode` | Correct |
+|---|---|---|
+| पुष्पा | `pusspaa` | Pushpa |
+| सुनिधि चौहान | `sunidhi cauhaan` | Sunidhi Chauhan |
+| સોનાલી વાજપેયી | `sonaalii vaajpeyaii` | Sonali Vajpayee |
+| ਸਤਿੰਦਰ ਸਰਤਾਜ | `stiNdr srtaaj` | Satinder Sartaaj |
+
+Searching Plex for "Pushpa" will never match "pusspaa", so mechanical
+transliteration makes the problem look solved while leaving it unsolved. It is
+fine for accented Latin (`Beyoncé` → `Beyonce`) and useless for Indic scripts.
+
+So the same cheapest-first ladder the identification chain already uses:
+
+| Order | Source | Cost | Why it works |
+|---|---|---|---|
+| 1 | A Latin result already returned by a provider | Free | Shazam and MusicBrainz return English for this catalogue — measured: "Sunidhi Chauhan — Saami Saami", album "Pushpa The Rise Part - 01" |
+| 2 | The YouTube video title | Free | Usually already English: "Pushpa: Saami Saami - Lyrical (Hindi) \| ..." |
+| 3 | Gemini, batched | Cheap | Accurate on all four cases above, and many strings fit in one call |
+| 4 | `unidecode` | Free | Last resort only, and logged as approximate |
+
+Tiers 1 and 2 cost nothing and cover most of the library, because the metadata
+came from an English-language source in the first place. Gemini is reached only
+for what genuinely arrives in native script, and batching keeps that inside the
+free tier's quota.
+
+The original script is kept on the `Track` row rather than discarded, so the
+choice is reversible and nothing is lost.
+
 ## Suggested first run
 
 ```bash

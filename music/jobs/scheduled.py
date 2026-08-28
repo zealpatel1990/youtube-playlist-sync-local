@@ -1,10 +1,7 @@
-"""
-Periodic tasks, run by the single scheduler thread in `worker.py`.
+"""Periodic tasks for the scheduler thread in `worker.py`.
 
-Everything here must be cheap and idempotent: the scheduler wakes once a minute
-and these run on a box where an unnecessary query is a real cost. Tasks that do
-actual work enqueue a Job rather than doing it inline, so the scheduler thread
-never blocks on IO.
+They run on that one thread, so each must be cheap, idempotent, and enqueue a
+Job rather than doing IO inline.
 """
 
 from __future__ import annotations
@@ -54,9 +51,7 @@ def _update_ytdlp() -> None:
     """Queue a yt-dlp upgrade, but only when nothing else is in flight.
 
     The upgrade restarts the service, which would kill an in-progress download
-    mid-write. Deferring costs nothing — the next tick is an hour away at most,
-    and yt-dlp being a few hours stale never matters. A restart landing on top
-    of a half-written MP3 does.
+    mid-write.
     """
     from music.models import Job, JobState
 
@@ -78,11 +73,7 @@ def _update_ytdlp() -> None:
 
 
 def _resume_pipeline() -> None:
-    """Re-enqueue work for tracks whose retry window has come round.
-
-    This is the one periodic query against the Track table. It is indexed on
-    (state, retry_at) and returns nothing in the steady state.
-    """
+    """Re-enqueue work for tracks whose retry window has come round."""
     from django.utils import timezone
 
     from music.models import Track, TrackState

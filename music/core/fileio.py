@@ -1,16 +1,4 @@
-"""
-Filesystem primitives.
-
-Every operation here assumes the target is a slow USB disk on a Pi and that the
-power may be cut at any moment:
-
-* hashing reads in 1 MiB blocks, not the previous version's 4 KiB (which turned
-  a 6 MB MP3 into ~1500 syscalls);
-* text writes are temp-file + fsync + os.replace, so a truncated .env can never
-  leave the service unbootable (docs/CODE-AUDIT.md A8);
-* moves prefer os.replace within a filesystem and fall back to copy → verify →
-  delete across one, never leaving the source deleted without a verified copy.
-"""
+"""Filesystem primitives: hashing, atomic writes, crash-safe moves."""
 
 from __future__ import annotations
 
@@ -25,7 +13,7 @@ log = logging.getLogger("music.fileio")
 
 CHUNK = 1024 * 1024
 
-#: Characters no common filesystem accepts, plus the ones Plex dislikes in paths.
+#: Characters no common filesystem accepts.
 _ILLEGAL = '<>:"/\\|?*\0'
 #: Windows refuses these basenames regardless of extension.
 _RESERVED = {
@@ -75,13 +63,7 @@ def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -
 
 
 def sanitize_component(name: str, *, fallback: str = "Unknown") -> str:
-    """Make one path segment safe, without destroying meaning.
-
-    Deliberately *unlike* the previous version's sanitizer, which stripped all
-    parenthesised text (losing "(Live)", "(Remix)" — and, on an unmatched
-    bracket, the entire rest of the title) and force-Title-Cased everything,
-    turning "ACDC" into "Acdc". Here only genuinely unsafe characters go.
-    """
+    """Make one path segment safe. Only genuinely unsafe characters are touched."""
     cleaned = "".join("_" if ch in _ILLEGAL else ch for ch in (name or ""))
     # Control characters break some filesystems and all terminals.
     cleaned = "".join(ch for ch in cleaned if ch >= " ")
@@ -93,10 +75,9 @@ def sanitize_component(name: str, *, fallback: str = "Unknown") -> str:
     # Keep well clear of the 255-byte per-component limit once UTF-8 encoded.
     encoded = cleaned.encode("utf-8")
     if len(encoded) > 200:
-        # rstrip(". ") again: the cut can land immediately after a dot, and a
-        # component ending in one is silently dropped by Windows/exFAT on
-        # create, so the file would land at a path that never again matches
-        # the computed one and would be "moved" on every pass.
+        # rstrip again: the cut can land right after a dot, and Windows/exFAT
+        # silently drop a trailing dot on create, so the file would land at a
+        # path that never matches the computed one and be "moved" every pass.
         cleaned = encoded[:200].decode("utf-8", errors="ignore").strip().rstrip(". ")
     return cleaned or fallback
 
@@ -115,11 +96,10 @@ def unique_path(target: str | Path) -> Path:
 
 
 def move_file(source: str | Path, target: str | Path, *, overwrite: bool = False) -> Path:
-    """Move a file, returning the path actually written.
+    """Move a file, returning the path actually written (may differ from `target`).
 
-    Same filesystem uses os.replace (atomic). Across filesystems the copy is
-    verified by size before the source is removed, so an interrupted move can
-    leave a stray temp file but never loses data.
+    Across filesystems the copy is size-verified before the source is removed, so
+    an interrupted move can leave a stray temp file but never loses data.
     """
     source, target = Path(source), Path(target)
     if not source.exists():

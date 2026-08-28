@@ -1,10 +1,4 @@
-"""
-Job handler registry.
-
-Handlers register themselves by decorator, so adding a job kind is one function
-and no edit to a central dispatch dict. The old `_HANDLERS` map meant every new
-kind touched the runner; here the runner never changes.
-"""
+"""Job handler registry. Handlers register themselves with the `@job` decorator."""
 
 from __future__ import annotations
 
@@ -64,9 +58,8 @@ def all_specs() -> dict[str, JobSpec]:
 def load_handlers() -> None:
     """Import the modules that register handlers.
 
-    Called once from the worker bootstrap. Import errors are logged and
-    swallowed per module so a missing optional dependency (shazamio, say)
-    disables one job kind instead of taking down the web app.
+    Import errors are swallowed per module, so a missing optional dependency
+    disables one job kind rather than the whole web app.
     """
     modules = (
         "music.jobs.handlers.library",

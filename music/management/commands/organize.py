@@ -1,14 +1,7 @@
-"""
-Plan — or, with --apply, perform — the moves that put tracks into the Plex layout.
+"""Plan — or, with --apply, perform — the moves into the Plex layout.
 
-A dry run is the default and always will be. Organizing rewrites the shape of a
-music library thousands of files at a time; the manifest is meant to be read
-before anything moves, and `--apply` is the explicit second action the
-architecture calls for.
-
-The manifest is not returned by the planner and is not held in memory here: it
-lives in the `planned_path` / `plan_note` columns, and this command pages
-through them.
+A dry run is the default. The manifest lives in the `planned_path` /
+`plan_note` columns rather than in memory, and this command pages through them.
 """
 
 from __future__ import annotations
@@ -65,11 +58,9 @@ class Command(BaseCommand):
 
     # -- the two service calls ---------------------------------------------
     #
-    # `plan_all` and `apply_all` sweep everything; neither takes a limit,
-    # because the pipeline never wants one. A capped pass therefore drives the
-    # per-track entry points instead — the same two functions the
-    # `organize.track` job handler calls — and reports only what it did rather
-    # than reproducing the sweeps' bookkeeping.
+    # `plan_all` and `apply_all` sweep everything and take no limit, because
+    # the pipeline never wants one. A capped pass drives the per-track entry
+    # points instead — the same two the `organize.track` job handler calls.
 
     def _plan(self, organizer, limit: int | None) -> dict[str, int]:
         if limit is None:
@@ -96,8 +87,8 @@ class Command(BaseCommand):
             try:
                 action(track)
             except Exception as exc:
-                # The organizer already logs the detail; the operator running a
-                # capped pass by hand wants it on the terminal too.
+                # The organizer logs this too; an operator running a capped
+                # pass by hand wants it on the terminal.
                 self.stderr.write(self.style.ERROR(f"  {track.path}: {exc}"))
                 counts["errors"] += 1
             else:
@@ -109,9 +100,7 @@ class Command(BaseCommand):
     def _write_manifest(self, limit: int | None) -> None:
         """Print the planned moves straight from the rows the planner wrote.
 
-        Streamed with `iterator()`, and only the three columns it prints: a
-        library big enough to need organizing is also big enough that
-        materializing it is a real cost on 1GB of RAM.
+        Streamed with `iterator()`, and only the three columns it prints.
         """
         planned = (
             Track.objects.exclude(planned_path="")

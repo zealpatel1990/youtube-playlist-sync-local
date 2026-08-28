@@ -1,19 +1,4 @@
-"""
-Job queue mechanics: enqueue, claim, complete, reap.
-
-Two changes from the previous version carry most of the value:
-
-**Dedup is a database constraint, not a Python check.** The old code did
-`filter(...).first()` then `create(...)`, which two concurrent requests could
-both pass (docs/CODE-AUDIT.md A6). Here `dedup_key` has a partial unique index
-over active states, so the race resolves in SQLite and the loser gets the
-winner's job back.
-
-**Claims carry a lease.** The old code had no timeout: a wedged handler left a
-job RUNNING forever, and because dedup matched RUNNING jobs, that work could
-never be re-queued until someone restarted the service. Here the reaper
-reclaims expired leases, so wedges self-heal.
-"""
+"""Job queue mechanics: enqueue, claim, complete, reap."""
 
 from __future__ import annotations
 
@@ -42,11 +27,7 @@ def enqueue(
     max_attempts: int | None = None,
     delay_seconds: float = 0.0,
 ) -> Job:
-    """Create a job, or return the existing active one with the same dedup key.
-
-    Never raises on duplicate — a caller enqueuing the same work twice gets the
-    same Job back, which is what every UI action wants.
-    """
+    """Create a job, or return the existing active one with the same dedup key."""
     spec = registry.get(kind)
     if spec is None:
         raise ValueError(f"unknown job kind: {kind!r}")
@@ -66,7 +47,7 @@ def enqueue(
             )
     except IntegrityError:
         # The partial unique index rejected it: an equivalent job is already
-        # QUEUED or RUNNING. Hand back the incumbent.
+        # QUEUED or RUNNING.
         existing = (
             Job.objects.filter(dedup_key=key, state__in=JobState.active())
             .order_by("id")
@@ -86,9 +67,8 @@ def enqueue(
 def claim_next() -> Job | None:
     """Atomically claim the highest-priority due job.
 
-    The conditional UPDATE is the entire lock: SQLite executes a single
-    statement atomically, so exactly one worker can transition a given row out
-    of QUEUED. A loser simply tries the next candidate.
+    The conditional UPDATE is the entire lock: SQLite runs a single statement
+    atomically, so exactly one worker can move a given row out of QUEUED.
     """
     now = timezone.now()
     lease_until = now + timedelta(seconds=settings.JOB_LEASE_SECONDS)
@@ -131,12 +111,7 @@ def finish_success(job: Job, message: str = "") -> None:
 
 
 def finish_failure(job: Job, error: str) -> None:
-    """Retry with backoff while attempts remain, then fail terminally.
-
-    The error is always retained. The old runner truncated `str(exc)` onto the
-    row with no traceback and no attempt count, so a repeatedly failing job was
-    indistinguishable from a newly failing one.
-    """
+    """Retry with backoff while attempts remain, then fail terminally."""
     job.refresh_from_db(fields=["attempts", "max_attempts"])
     text = (error or "")[:4000]
 
@@ -168,10 +143,7 @@ def finish_failure(job: Job, error: str) -> None:
 
 
 def reap(now=None) -> dict[str, int]:
-    """Reclaim expired leases and prune old terminal rows.
-
-    Runs in the scheduler thread — no dedicated thread, no extra idle cost.
-    """
+    """Reclaim expired leases and prune old terminal rows."""
     now = now or timezone.now()
 
     reclaimed = Job.objects.filter(
@@ -203,8 +175,8 @@ def reap(now=None) -> dict[str, int]:
 def requeue_orphans() -> int:
     """At boot, return any RUNNING rows to the queue.
 
-    Safe only because the runtime guard guarantees a single process — with two
-    processes this would steal jobs a sibling is actively running (A6).
+    Safe only because the runtime guard guarantees a single process; a second
+    process would steal jobs a sibling is actively running.
     """
     count = Job.objects.filter(state=JobState.RUNNING).update(
         state=JobState.QUEUED,
@@ -217,11 +189,8 @@ def requeue_orphans() -> int:
     return count
 
 
-# --- worker wakeup ------------------------------------------------------
-#
-# Set by the worker pool at startup. Workers block on this event instead of
-# querying the database on a timer, so an idle system does no work at all.
-
+# Set by the worker pool at startup. In-process, so the app must run as a
+# single process — workers block on this event instead of polling.
 _wake_event = None
 
 

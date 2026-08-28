@@ -1,32 +1,12 @@
-"""
-Incremental directory scan.
+"""Incremental directory scan.
 
-The library this has to walk is tens of thousands of files on a USB disk hanging
-off a Pi 2 with 1 GB of RAM, so two properties matter more than anything else:
+Nothing is fully materialized: the walk is `os.scandir` with an explicit stack,
+and the database side streams too. A rescan of an unchanged library costs one
+stat and one indexed lookup per file — no tag read, no hash, no write.
 
-**Nothing is ever fully materialized.** The walk is `os.scandir` with an
-explicit stack — one open directory handle at a time, no `os.walk` tuples, no
-`glob`, no list of paths held for the duration. The database side streams too:
-`values()` for the change check, `.iterator()` for the missing sweep, and
-batched `bulk_create`/`bulk_update` so peak memory is one batch rather than one
-library.
-
-**A rescan of an unchanged library is nearly free.** For every file already
-known at that path with the same size and mtime, the scan does exactly one
-`stat` and one indexed lookup, and then stops — no tag read, no hash, no write.
-That is what makes `RESCAN_INTERVAL_MINUTES` a reasonable thing to turn on: the
-steady-state cost of a scheduled rescan is a directory walk, which the OS has
-largely cached anyway.
-
-Writes follow the audit's rule (docs/CODE-AUDIT.md A5): a bare `save()` on a row
-another job has deleted silently re-INSERTs it, so nothing here uses one.
-`bulk_create` inserts, `bulk_update` and queryset `.update()` only ever touch
-rows that still exist, and the one-at-a-time fallback uses `force_insert=True`.
-
-Identification is deliberately *not* done here. A scan records what exists and
-leaves the pipeline to identify it, so a scan interrupted at any point has
-still made durable progress and the expensive, rate-limited providers stay on
-the job queue where their failures are visible and retried.
+No bare `save()` anywhere: one on a row another job has deleted silently
+re-INSERTs it, so the one-at-a-time fallback uses `force_insert=True`.
+Identification is deliberately not done here.
 """
 
 from __future__ import annotations
@@ -50,23 +30,18 @@ log = logging.getLogger("music.library.scanner")
 
 __all__ = ["ScanResult", "ensure_roots", "scan_root", "scan_all"]
 
-#: Rows per database round trip. Small enough that a crash loses at most this
-#: many files' worth of work, large enough that the per-statement overhead of
-#: SQLite on an SD card is amortised.
+#: Rows per database round trip.
 BATCH_SIZE = 100
 
-#: Files between heartbeats. A scan of a large root can outlive the job lease
-#: (JOB_LEASE_SECONDS, 15 minutes by default); without this the reaper would
-#: reclaim a perfectly healthy scan and run it again from the top.
+#: Files between heartbeats. A scan of a large root outlives the job lease, and
+#: the reaper would otherwise reclaim a healthy scan and rerun it from the top.
 HEARTBEAT_EVERY = 50
 
-#: mtime is a float through SQLite; compare with a tolerance rather than for
-#: equality. Any real modification moves it by far more than a millisecond.
+#: mtime is a float through SQLite; compare with a tolerance, not for equality.
 MTIME_TOLERANCE = 0.001
 
-#: Directories never descended into, on top of every dotted name.
-#: `.duplicates` is where the organizer parks losing copies — re-scanning it
-#: would recreate the very rows the duplicate policy just resolved.
+#: Never descended into, on top of every dotted name. Rescanning `.duplicates`
+#: would recreate the rows the duplicate policy just resolved.
 SKIP_DIRS = {DUPLICATES_DIRNAME, "@eadir", "lost+found"}
 
 #: Fields a rescan may overwrite on a file whose bytes changed on disk.
@@ -98,9 +73,7 @@ class ScanResult:
     updated: int = 0
     skipped: int = 0
     errors: int = 0
-    #: Rows whose file has disappeared since the last scan. Not in the caller's
-    #: original contract, but the number the operator actually asks about after
-    #: unplugging a drive, and free to collect while we are here.
+    #: Rows whose file has disappeared since the last scan.
     missing: int = 0
 
     def __str__(self) -> str:
@@ -118,11 +91,8 @@ def scan_root(
 ) -> ScanResult:
     """Walk one directory tree and reconcile it with the Track table.
 
-    New and changed files get their tags and audio properties read and land in
-    `DISCOVERED`; unchanged files cost one stat; files that have gone are marked
-    `MISSING` rather than deleted, because the overwhelmingly likely cause is an
-    unplugged USB drive and deleting the row would throw away the identification
-    work that went into it.
+    Files that have gone are marked `MISSING`, never deleted — the likely cause
+    is an unplugged drive, and the row holds real identification work.
     """
     result = ScanResult()
     root = Path(root).expanduser()
@@ -144,8 +114,7 @@ def scan_root(
         try:
             _consider(file_path, stat, source, result, new_rows, changed_rows)
         except Exception:
-            # One unreadable file must not end the scan; the rest of the
-            # library is still worth recording.
+            # One unreadable file must not end the scan.
             log.exception("could not process %s", file_path)
             result.errors += 1
 
@@ -163,10 +132,8 @@ def scan_root(
 def ensure_roots() -> int:
     """Seed `ScanRoot` rows from `settings.SCAN_ROOTS`. Returns the number added.
 
-    This lives here rather than in the job handler so that *every* entry point
-    behaves the same. When it was only in the handler, calling `scan_all()` from
-    a management command, a test or the shell scanned nothing at all and said so
-    only at INFO level — a silent no-op that looks exactly like an empty library.
+    Here rather than in the job handler, so a `scan_all()` from a command or
+    the shell does not silently scan nothing.
     """
     added = 0
     for configured in settings.SCAN_ROOTS:
@@ -182,14 +149,11 @@ def ensure_roots() -> int:
 def scan_all(heartbeat: Callable[[], None] | None = None) -> dict[str, ScanResult]:
     """Scan every enabled `ScanRoot`, keyed by path.
 
-    A failing root is recorded on its own row and the next one still runs — one
-    unplugged drive must not stop the others being scanned.
+    A failing root is recorded on its own row and the next one still runs.
     """
     ensure_roots()
 
-    # The whole list is loaded on purpose: there are a handful of roots, and we
-    # write to this same table inside the loop, which is exactly the case where
-    # iterating an open cursor is not worth the cleverness.
+    # Loaded whole: a handful of roots, and the loop writes to this same table.
     roots = list(ScanRoot.objects.filter(enabled=True).order_by("path"))
     if not roots:
         log.warning(
@@ -228,21 +192,14 @@ def scan_all(heartbeat: Callable[[], None] | None = None) -> dict[str, ScanResul
     return results
 
 
-# --------------------------------------------------------------------------
-# The walk
-# --------------------------------------------------------------------------
+# --- The walk ----------------------------------------------------------
 
 
 def _iter_audio_files(root: Path) -> Iterator[tuple[str, os.stat_result]]:
     """Yield `(path, stat)` for every audio file under `root`.
 
-    An explicit stack rather than recursion or `os.walk`: a directory is fully
-    drained and its handle closed before we descend, so exactly one directory
-    handle is open at any moment no matter how deep or how wide the tree.
-
-    Symlinked *directories* are not followed — a link back up the tree makes a
-    scan that never finishes, and no music library needs it. Symlinked files are
-    scanned normally; they cannot loop.
+    An explicit stack, so one directory handle is open at a time. Symlinked
+    *directories* are not followed: a link back up the tree never finishes.
     """
     extensions = settings.AUDIO_EXTENSIONS
     stack: list[str] = [str(root)]
@@ -254,10 +211,9 @@ def _iter_audio_files(root: Path) -> Iterator[tuple[str, os.stat_result]]:
             with os.scandir(current) as entries:
                 for entry in entries:
                     name = entry.name
-                    # Hidden names cover .duplicates, .Trash-1000, macOS
-                    # AppleDouble "._Song.mp3" stubs (which carry an audio
-                    # extension but are metadata, not audio), and every
-                    # editor's temp file.
+                    # Covers .duplicates, .Trash-1000, editor temp files, and
+                    # macOS AppleDouble "._Song.mp3" stubs — which carry an
+                    # audio extension but are metadata, not audio.
                     if name.startswith("."):
                         continue
                     try:
@@ -275,8 +231,7 @@ def _iter_audio_files(root: Path) -> Iterator[tuple[str, os.stat_result]]:
                         continue
                     yield entry.path, stat
         except OSError as exc:
-            # An unreadable directory is a permissions problem or a drive that
-            # went away mid-scan. Note it and carry on with the rest.
+            # A permissions problem, or a drive that went away mid-scan.
             log.warning("cannot read %s: %s", current, exc)
             continue
 
@@ -302,7 +257,7 @@ def _consider(
         result.skipped += 1
         return
 
-    # Only now — for a genuinely new or changed file — is it worth opening it.
+    # Only now, for a genuinely new or changed file, is it worth opening it.
     metadata, duration, bitrate = tagio.read_metadata(Path(file_path))
 
     if existing is None:
@@ -333,8 +288,7 @@ def _consider(
 
     # Changed on disk, or back after being marked MISSING. Either way the file
     # is the authority on itself again, so re-read it and hand it back to the
-    # pipeline. Tags are merged rather than assigned: a file whose tags were
-    # stripped must not blank out metadata a provider already established.
+    # pipeline.
     row = Track(pk=existing["id"], path=file_path)
     row.size_bytes = stat.st_size
     row.mtime = stat.st_mtime
@@ -367,9 +321,7 @@ def _unchanged(existing: dict, stat: os.stat_result) -> bool:
     )
 
 
-# --------------------------------------------------------------------------
-# Persistence
-# --------------------------------------------------------------------------
+# --- Persistence -------------------------------------------------------
 
 
 def _flush(new_rows: list[Track], changed_rows: list[Track], result: ScanResult) -> None:
@@ -393,10 +345,8 @@ def _flush(new_rows: list[Track], changed_rows: list[Track], result: ScanResult)
 def _insert(rows: list[Track], result: ScanResult) -> None:
     """Insert a batch, falling back to one-at-a-time on a path collision.
 
-    `Track.path` is unique, so a download job that created a row for a file we
-    are scanning right now loses the whole batch. Rare enough to be worth
-    handling by retrying individually rather than by `ignore_conflicts`, which
-    would leave the counts lying about how many rows were really added.
+    Not `ignore_conflicts`, which would leave the counts lying about how many
+    rows were really added.
     """
     try:
         with transaction.atomic():
@@ -412,7 +362,7 @@ def _insert(rows: list[Track], result: ScanResult) -> None:
                 row.save(force_insert=True)
             inserted += 1
         except IntegrityError:
-            # Someone else got there first. Their row wins; ours is discarded.
+            # Someone else got there first; their row wins.
             log.debug("track already exists for %s", row.path)
     result.added -= len(rows) - inserted
 
@@ -420,11 +370,8 @@ def _insert(rows: list[Track], result: ScanResult) -> None:
 def _mark_missing(root: Path, *, heartbeat: Callable[[], None] | None = None) -> int:
     """Flag rows under `root` whose file is gone. Never deletes one.
 
-    A stat per known track is the price of not keeping the set of seen paths in
-    memory — tens of thousands of strings on a 1 GB box — and it is paid right
-    after the walk, when the kernel's dentry cache is as warm as it will ever
-    be. Rows are flagged in batches with a queryset `update()`, which cannot
-    resurrect a row another job deleted underneath us (A5).
+    A stat per known track is the price of not holding the set of seen paths in
+    memory; it is paid right after the walk while the dentry cache is warm.
     """
     prefix = os.path.join(str(root), "")
     candidates = (

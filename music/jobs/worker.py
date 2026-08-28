@@ -1,14 +1,7 @@
-"""
-The worker pool and scheduler.
+"""The worker pool and scheduler. Workers block on an event; they do not poll.
 
-Workers **block on an event**, they do not poll. `engine.enqueue` sets the
-event; a worker wakes, drains everything claimable, and goes back to waiting.
-An idle system therefore issues zero queries — the previous version ran one
-SELECT per worker every two seconds forever, which on a Pi 2 is a measurable
-share of a core doing nothing.
-
-`WORKER_IDLE_WAKE_SECONDS` is a safety net for work enqueued by another process
-(a management command), not a poll interval; five minutes is a fine default.
+The wake event is in-process, so gunicorn must run with `--workers 1` and scale
+through WORKER_THREADS instead.
 """
 
 from __future__ import annotations
@@ -51,9 +44,7 @@ def start() -> bool:
             )
             return False
 
-        # Handlers are normally registered by MusicConfig.ready(); this is a
-        # no-op then, and a safety net for any entry point that starts the pool
-        # without Django's app registry having run.
+        # Normally already done by MusicConfig.ready(); a no-op then.
         registry.load_handlers()
         engine.set_wake_event(_wake)
 
@@ -109,12 +100,13 @@ def is_running() -> bool:
 
 def _worker_loop() -> None:
     while not _stop.is_set():
-        # Wait for work. The timeout only catches jobs enqueued out-of-process.
+        # The timeout is a safety net for jobs enqueued out-of-process, not a
+        # poll interval.
         _wake.wait(timeout=settings.WORKER_IDLE_WAKE_SECONDS)
         if _stop.is_set():
             return
         # Clear before draining: an enqueue during the drain re-sets it and we
-        # simply loop again, so no wakeup can be lost.
+        # loop again, so no wakeup can be lost.
         _wake.clear()
         try:
             _drain()
@@ -164,12 +156,7 @@ def _run(job) -> None:
 
 
 def _scheduler_loop() -> None:
-    """Periodic maintenance: lease reaping, pruning, optional sync and rescan.
-
-    One thread handles all of it. Each task tracks its own next-due time, so
-    the thread wakes once a minute, does nothing in the common case, and sleeps
-    again.
-    """
+    """Periodic maintenance: lease reaping, pruning, optional sync and rescan."""
     from music.jobs import scheduled
 
     next_due: dict[str, float] = {}
