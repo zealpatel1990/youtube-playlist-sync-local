@@ -1,0 +1,32 @@
+{% extends "music/base.html" %}
+
+{% block title %}Jobs{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h4 mb-0 d-flex align-items-center gap-2">
+        Jobs
+        <span class="badge rounded-pill text-bg-secondary">{{ page_obj.paginator.count }}</span>
+    </h1>
+    <span class="small text-body-secondary">
+        Every scan, identification, move and restart passes through here.
+    </span>
+</div>
+
+<div class="btn-group btn-group-sm mb-3" role="group" aria-label="Filter by state">
+    {% for f in filters %}
+    <a class="btn {% if f.active %}btn-primary{% else %}btn-outline-secondary{% endif %}"
+       href="{% url 'jobs' %}{% if f.value %}?state={{ f.value }}{% endif %}">
+        {{ f.label }}
+        {% if f.count %}<span class="ms-1 opacity-75">{{ f.count }}</span>{% endif %}
+    </a>
+    {% endfor %}
+</div>
+
+{% comment %}
+The partial carries its own #job-list wrapper and sse:update trigger, so it can
+replace itself wholesale on a live update. Wrapping it again here would nest two
+elements with the same id.
+{% endcomment %}
+{% include "music/_job_list.html" %}
+{% endblock %}

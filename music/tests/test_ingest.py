@@ -404,7 +404,11 @@ class UpgradeTests(SimpleTestCase):
 
         install = run.call_args_list[0]
         self.assertEqual(
-            install.args[0], ["/venv/bin/pip", "install", "--upgrade", "yt-dlp"]
+            install.args[0],
+            [
+                "/venv/bin/pip", "install", "--upgrade",
+                "--no-cache-dir", "--disable-pip-version-check", "yt-dlp",
+            ],
         )
         self.assertEqual(install.kwargs["timeout"], youtube.PIP_TIMEOUT)
         self.assertIs(install.kwargs["check"], True)

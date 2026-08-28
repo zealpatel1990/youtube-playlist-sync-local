@@ -50,6 +50,33 @@ def _rescan_library() -> None:
     engine.enqueue("library.scan_all", dedup_key="library.scan_all", priority=1)
 
 
+def _update_ytdlp() -> None:
+    """Queue a yt-dlp upgrade, but only when nothing else is in flight.
+
+    The upgrade restarts the service, which would kill an in-progress download
+    mid-write. Deferring costs nothing — the next tick is an hour away at most,
+    and yt-dlp being a few hours stale never matters. A restart landing on top
+    of a half-written MP3 does.
+    """
+    from music.models import Job, JobState
+
+    from . import engine
+
+    busy = Job.objects.filter(
+        state__in=JobState.active(),
+        kind__in=("youtube.download", "youtube.sync", "organize.apply_all"),
+    ).exists()
+    if busy:
+        log.info("deferring the yt-dlp upgrade: downloads or moves are running")
+        return
+
+    engine.enqueue(
+        "maintenance.update_ytdlp",
+        dedup_key="maintenance.update_ytdlp",
+        priority=-5,
+    )
+
+
 def _resume_pipeline() -> None:
     """Re-enqueue work for tracks whose retry window has come round.
 
@@ -83,5 +110,8 @@ def tasks() -> list[ScheduledTask]:
         ),
         ScheduledTask(
             "rescan_library", settings.RESCAN_INTERVAL_MINUTES * 60.0, _rescan_library
+        ),
+        ScheduledTask(
+            "update_ytdlp", settings.YTDLP_AUTO_UPDATE_HOURS * 3600.0, _update_ytdlp
         ),
     ]

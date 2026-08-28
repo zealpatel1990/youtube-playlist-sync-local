@@ -1,0 +1,95 @@
+{% load music_extras %}
+{% comment %}
+The whole card, headers and pagination included, so a live swap keeps the
+filter and page controls consistent with the rows they describe.
+{% endcomment %}
+<div id="job-list"
+     hx-get="{% url 'jobs' %}?state={{ state }}&page={{ page_obj.number }}"
+     hx-trigger="sse:update from:body"
+     hx-swap="outerHTML">
+<div class="card">
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0 job-table">
+            <thead>
+                <tr>
+                    <th style="width:5rem;">Job</th>
+                    <th>Kind</th>
+                    <th style="width:8rem;">State</th>
+                    <th>Result</th>
+                    <th style="width:7rem;" class="text-end">Took</th>
+                    <th style="width:9rem;">When</th>
+                    <th style="width:3rem;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in jobs %}
+                <tr>
+                    <td class="text-body-tertiary"><code>#{{ job.id }}</code></td>
+                    <td><code class="small">{{ job.kind }}</code></td>
+                    <td>
+                        <span class="badge {{ job.state|job_state_class }}">{{ job.get_state_display }}</span>
+                        {% if job.attempts > 1 %}
+                        <span class="small text-body-secondary d-block">
+                            attempt {{ job.attempts }}/{{ job.max_attempts }}
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="small text-body-secondary">
+                        {% if job.message %}{{ job.message|truncatechars:90 }}
+                        {% else %}<span class="text-body-tertiary">&mdash;</span>{% endif %}
+                    </td>
+                    <td class="text-end small text-body-secondary">
+                        {% if job.started_at %}{{ job.duration_seconds|duration_short }}{% else %}&mdash;{% endif %}
+                    </td>
+                    <td class="small text-body-secondary">{{ job.created_at|date:"M j, H:i:s" }}</td>
+                    <td class="text-end">
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                data-bs-toggle="modal" data-bs-target="#jobModal"
+                                hx-get="{% url 'job_detail' job.id %}"
+                                hx-target="#job-modal-body"
+                                title="Details">
+                            <i class="bi bi-search"></i>
+                        </button>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="7" class="text-center text-body-secondary py-5">
+                        <i class="bi bi-inbox fs-4 d-block mb-2"></i>
+                        No jobs{% if state %} in this state{% endif %} yet.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if page_obj.paginator.num_pages > 1 %}
+    <div class="card-footer d-flex justify-content-between align-items-center py-2">
+        <span class="small text-body-secondary">
+            Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+        </span>
+        {% comment %}
+        Guarded with has_previous / has_next rather than a |default: filter.
+        Paginator.previous_page_number RAISES EmptyPage when there is no
+        previous page, so the filter never gets a value to fall back on — the
+        template just blows up on page one.
+        {% endcomment %}
+        <div class="btn-group btn-group-sm">
+            {% if page_obj.has_previous %}
+            <a class="btn btn-outline-secondary"
+               href="?state={{ state }}&page={{ page_obj.previous_page_number }}">Newer</a>
+            {% else %}
+            <span class="btn btn-outline-secondary disabled">Newer</span>
+            {% endif %}
+            {% if page_obj.has_next %}
+            <a class="btn btn-outline-secondary"
+               href="?state={{ state }}&page={{ page_obj.next_page_number }}">Older</a>
+            {% else %}
+            <span class="btn btn-outline-secondary disabled">Older</span>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+</div>

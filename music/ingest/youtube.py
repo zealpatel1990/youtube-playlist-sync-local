@@ -537,7 +537,16 @@ def upgrade_ytdlp() -> str:
       terminal state is persisted — the precise race in A7. The caller writes
       its state first, then restarts.
     """
-    command = [settings.PIP_PATH, "install", "--upgrade", "yt-dlp"]
+    command = [
+        settings.PIP_PATH, "install", "--upgrade",
+        # The Pi's root filesystem is an SD card; pip's wheel cache is pure
+        # cost there for a package upgraded a handful of times a year.
+        "--no-cache-dir",
+        # Saves pip an extra network round trip on a slow link, and stops it
+        # printing an upgrade notice into the job's captured output.
+        "--disable-pip-version-check",
+        "yt-dlp",
+    ]
     log.info("upgrading yt-dlp: %s", " ".join(command))
     result = subprocess.run(
         command,

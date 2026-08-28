@@ -66,6 +66,10 @@
                     <a class="nav-link {% if nav == 'duplicates' %}active fw-semibold{% endif %}"
                        href="{% url 'duplicates' %}">Duplicates</a>
                 </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if nav == 'jobs' %}active fw-semibold{% endif %}"
+                       href="{% url 'jobs' %}">Jobs</a>
+                </li>
             </ul>
 
             <div class="d-flex align-items-center gap-2 flex-wrap">
@@ -109,6 +113,29 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body" id="settings-modal-body">
+                <div class="text-center text-body-secondary py-4">
+                    <span class="spinner-border spinner-border-sm"></span> Loading…
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% comment %}
+Job details. Same pattern as the settings panel: the body is fetched fresh by
+htmx for the job that was clicked, so the list page never has to carry payloads
+or 4000-character tracebacks it will probably not show.
+{% endcomment %}
+<div class="modal fade" id="jobModal" tabindex="-1" aria-labelledby="jobModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title d-flex align-items-center gap-2" id="jobModalLabel">
+                    <i class="bi bi-list-check"></i> Job detail
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="job-modal-body">
                 <div class="text-center text-body-secondary py-4">
                     <span class="spinner-border spinner-border-sm"></span> Loading…
                 </div>

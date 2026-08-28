@@ -13,7 +13,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 from django import template
 
-from music.models import TrackState
+from music.models import JobState, TrackState
 
 register = template.Library()
 
@@ -78,3 +78,38 @@ def percent(value) -> str:
         return f"{float(value or 0) * 100:.0f}%"
     except (TypeError, ValueError):
         return ""
+
+
+#: Bootstrap badge class per job state. Separate from STATE_STYLE because a job
+#: and a track have different lifecycles that happen to share some words.
+JOB_STATE_CLASS: dict[str, str] = {
+    JobState.QUEUED: "text-bg-secondary",
+    JobState.RUNNING: "text-bg-info",
+    JobState.SUCCEEDED: "text-bg-success",
+    JobState.FAILED: "text-bg-danger",
+    JobState.CANCELLED: "text-bg-secondary",
+}
+
+
+@register.filter
+def job_state_class(state: str) -> str:
+    return JOB_STATE_CLASS.get(state, "text-bg-secondary")
+
+
+@register.filter
+def duration_short(seconds) -> str:
+    """A job's runtime at a glance: `0.4s`, `12s`, `3m 05s`, `1h 02m`."""
+    try:
+        total = float(seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return "—"
+    if total < 1:
+        return f"{total:.1f}s"
+    if total < 60:
+        return f"{total:.0f}s"
+    if total < 3600:
+        return f"{int(total // 60)}m {int(total % 60):02d}s"
+    return f"{int(total // 3600)}h {int((total % 3600) // 60):02d}m"
+

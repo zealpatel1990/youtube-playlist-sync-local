@@ -14,6 +14,18 @@ class MusicConfig(AppConfig):
     verbose_name = "Music library"
 
     def ready(self) -> None:
+        # Register job handlers here, NOT in the worker bootstrap.
+        #
+        # Registering handlers and running worker threads are different things,
+        # and conflating them broke `runserver`: manage.py disables the worker
+        # pool so a management command cannot start one competing with the live
+        # service, which also meant the registry stayed empty — so every view
+        # that enqueues a job raised "unknown job kind" and returned a 500.
+        # Anything that enqueues needs the registry; only the pool needs threads.
+        from music.jobs import registry
+
+        registry.load_handlers()
+
         # Warn about configuration that is legal but risky, once, at startup.
         # These are warnings rather than errors because the app is already live
         # on the user's Pi and refusing to boot would be worse than the risk.

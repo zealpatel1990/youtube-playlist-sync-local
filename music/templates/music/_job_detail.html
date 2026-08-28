@@ -1,0 +1,76 @@
+{% load music_extras %}
+{% comment %}
+One job in full. Loaded on demand into the modal body, which is why the list
+page can afford to omit the payload and the error text entirely.
+{% endcomment %}
+
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+    <code class="fs-6">#{{ job.id }} {{ job.kind }}</code>
+    <span class="badge {{ job.state|job_state_class }}">{{ job.get_state_display }}</span>
+    {% if job.attempts > 1 %}
+    <span class="badge text-bg-secondary">attempt {{ job.attempts }} of {{ job.max_attempts }}</span>
+    {% endif %}
+</div>
+
+{% if spec and spec.description %}
+<p class="text-body-secondary small">{{ spec.description }}</p>
+{% endif %}
+
+<dl class="row small mb-3">
+    <dt class="col-4 col-sm-3 text-body-secondary">Created</dt>
+    <dd class="col-8 col-sm-9">{{ job.created_at|date:"M j Y, H:i:s" }}</dd>
+
+    <dt class="col-4 col-sm-3 text-body-secondary">Started</dt>
+    <dd class="col-8 col-sm-9">
+        {% if job.started_at %}{{ job.started_at|date:"M j Y, H:i:s" }}
+        {% else %}<span class="text-body-tertiary">not yet</span>{% endif %}
+    </dd>
+
+    <dt class="col-4 col-sm-3 text-body-secondary">Finished</dt>
+    <dd class="col-8 col-sm-9">
+        {% if job.finished_at %}{{ job.finished_at|date:"M j Y, H:i:s" }}
+            <span class="text-body-secondary">({{ duration|duration_short }})</span>
+        {% else %}<span class="text-body-tertiary">still open</span>{% endif %}
+    </dd>
+
+    {% if job.state == "QUEUED" and job.scheduled_for %}
+    <dt class="col-4 col-sm-3 text-body-secondary">Runs at</dt>
+    <dd class="col-8 col-sm-9">
+        {{ job.scheduled_for|date:"M j Y, H:i:s" }}
+        <span class="text-body-secondary">— backoff after a failed attempt</span>
+    </dd>
+    {% endif %}
+
+    {% if job.state == "RUNNING" and job.lease_expires_at %}
+    <dt class="col-4 col-sm-3 text-body-secondary">Lease</dt>
+    <dd class="col-8 col-sm-9">
+        expires {{ job.lease_expires_at|date:"H:i:s" }}
+        <span class="text-body-secondary">— reclaimed and retried if the worker stops responding</span>
+    </dd>
+    {% endif %}
+
+    {% if job.dedup_key %}
+    <dt class="col-4 col-sm-3 text-body-secondary">Dedup key</dt>
+    <dd class="col-8 col-sm-9"><code class="small">{{ job.dedup_key }}</code></dd>
+    {% endif %}
+</dl>
+
+{% if job.message %}
+<h6 class="small text-body-secondary text-uppercase">Result</h6>
+<pre class="detail-pre">{{ job.message }}</pre>
+{% endif %}
+
+{% if job.error %}
+<h6 class="small text-danger text-uppercase">Error</h6>
+{% comment %}
+Rendered with Django's autoescaping into a <pre>. The text is a traceback from
+this machine, but it can quote a filename or a provider response that came from
+outside, so it is escaped like any other untrusted string (A11).
+{% endcomment %}
+<pre class="detail-pre detail-pre-error">{{ job.error }}</pre>
+{% endif %}
+
+{% if payload and payload != "{}" %}
+<h6 class="small text-body-secondary text-uppercase">Payload</h6>
+<pre class="detail-pre">{{ payload }}</pre>
+{% endif %}

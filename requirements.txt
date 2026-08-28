@@ -1,33 +1,59 @@
-# Pinned where a surprise upgrade would break the service; ranged only for
-# yt-dlp, which must stay current to keep working against YouTube at all.
+# Pinned exactly, with one deliberate exception (yt-dlp, below).
 #
-# Raspberry Pi 2 is 32-bit ARMv7. Wheels come from piwheels, not from the
-# aarch64 PyPI builds — check availability there before adding anything:
-#     pip install --index-url https://www.piwheels.org/simple ...
+# Raspberry Pi 2 is 32-bit ARMv7. Two packages here carry compiled extensions —
+# pydantic-core (Rust, via google-genai) and websockets — so they need prebuilt
+# ARM wheels or the Pi will try to compile Rust on a 900MHz core. piwheels has
+# both, as cp311 armv6l wheels (armv6l runs on armv7), so the Pi must be on
+# Raspberry Pi OS Bookworm with Python 3.11 and piwheels configured:
+#
+#     # /etc/pip.conf
+#     [global]
+#     extra-index-url = https://www.piwheels.org/simple
+#
+# Before adding anything new, check https://www.piwheels.org/project/<name>/
+# for a wheel matching the Pi's Python version.
 
+# --- Web ------------------------------------------------------------------
+# Django 5.2 is an LTS release (security support into 2028). 6.x exists but a
+# major upgrade on a live 24/7 service buys nothing here; revisit deliberately.
 django==5.2.16
 gunicorn==23.0.0
 whitenoise==6.12.0
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 
-# Media
-yt-dlp>=2025.8.27          # must float; YouTube changes constantly
-mutagen==1.47.0            # all tag IO (replaces eyed3: one save pass, more formats)
+# --- Media ----------------------------------------------------------------
+# The ONLY floating pin, and deliberately so: YouTube changes constantly and a
+# stale yt-dlp stops downloading altogether. It is also the one package the app
+# can upgrade itself, from the dashboard or on a schedule
+# (YTDLP_AUTO_UPDATE_HOURS) — see music/jobs/handlers/maintenance.py.
+yt-dlp>=2026.8.19
 
-# Identification
-shazamio>=0.5.0            # optional; disable with SHAZAM_ENABLED=0
-google-genai==1.32.0       # optional; last-resort metadata inference
+# All tag reading and writing. Replaced eyed3: one save pass instead of two,
+# and it handles mp3/m4a/flac/ogg through one interface.
+mutagen==1.48.1
 
-# AcoustID needs NO Python package. It is the fpcalc binary plus a plain HTTP
-# lookup over stdlib urllib, so there is nothing for pyacoustid to do here —
-# and skipping it avoids a compiled binding on a box where armv7 wheels are
-# scarce. Install the binary instead:
-#     sudo apt install libchromaprint-tools
+# --- Identification -------------------------------------------------------
+# Optional; disable with SHAZAM_ENABLED=0. Pinned rather than left open like
+# the previous version's `>=0.5.0`, which made every fresh install a different
+# build. It talks to an unofficial endpoint, so if recognition starts failing
+# across the board, bumping this is the first thing to try.
+shazamio==0.8.1
 
-# Notes on what is NOT here:
-#   djangorestframework — the read-only JSON endpoints the old app exposed were
-#     unauthenticated and unused; plain views cover what the dashboard needs.
-#   eyed3 — replaced by mutagen.
-#   argparse — that PyPI package is a dead Python 2 backport; it has been in
-#     the standard library since 3.2 and installing it can shadow the stdlib.
-#   tqdm, python-dateutil, unidecode — no longer used.
+# Optional; last-resort metadata inference. 2.x moved to pydantic v2 — the
+# call surface this app uses (Client, models.generate_content,
+# GenerateContentConfig.response_mime_type / http_options) is unchanged and
+# verified against 2.20.
+google-genai==2.20.0
+
+# --- Not dependencies -----------------------------------------------------
+# AcoustID needs NO Python package: it is the fpcalc binary plus a plain HTTP
+# lookup over stdlib urllib, which avoids another compiled binding on ARM.
+#     sudo apt install libchromaprint-tools ffmpeg
+#
+# Deliberately absent, and why:
+#   djangorestframework — the old read-only JSON endpoints were unauthenticated
+#     and unused; plain views cover what the dashboard needs.
+#   eyed3               — replaced by mutagen.
+#   argparse            — that PyPI package is a dead Python 2 backport; it has
+#     been in the standard library since 3.2 and installing it can shadow it.
+#   tqdm, python-dateutil, unidecode — no longer used by any code path.

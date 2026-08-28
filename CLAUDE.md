@@ -19,7 +19,9 @@ The session runs in `permissions.defaultMode: "auto"`, where a classifier auto-a
 
 **Single process, enforced.** The event wakeup, the revision counter, the keyed locks, and requeue-orphans-at-boot are all in-process and are only correct with `gunicorn --workers 1`. [music/core/runtime.py](music/core/runtime.py) takes a lock file at startup to make that checkable. Never add `--preload` — threads do not survive gunicorn's fork.
 
-**"Less connecting, more proper code."** Stability and deliberate error handling over features. No new processes, brokers, or dependencies where direct code will do. Before adding any dependency, check it has an **armv7** wheel on piwheels — not just aarch64 on PyPI.
+**"Less connecting, more proper code."** Stability and deliberate error handling over features. No new processes, brokers, or dependencies where direct code will do. Before adding any dependency, check it has an **armv7** wheel on piwheels — not just aarch64 on PyPI. Two current dependencies carry compiled extensions (`pydantic-core` via google-genai, and `websockets`), so the Pi needs Python 3.11 with piwheels configured or it will try to compile Rust on a 900MHz core.
+
+**yt-dlp is the only dependency the app upgrades itself**, from the dashboard or on the `YTDLP_AUTO_UPDATE_HOURS` timer, because it is the only one that rots on someone else's schedule — YouTube changes and downloads stop. Everything else is pinned in `requirements.txt` and moves when a human decides. Don't add unattended upgrades for other packages: bouncing a 24/7 service to install a tagging-library change nobody asked for is a bad trade.
 
 **Gemini is free-tier with a very low quota.** It is the last resort in the identification chain, behind a rate limiter *and* a hard `DailyBudget`. Never move it earlier or call it in a loop.
 

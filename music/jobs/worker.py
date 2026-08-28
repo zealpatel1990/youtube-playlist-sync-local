@@ -51,6 +51,9 @@ def start() -> bool:
             )
             return False
 
+        # Handlers are normally registered by MusicConfig.ready(); this is a
+        # no-op then, and a safety net for any entry point that starts the pool
+        # without Django's app registry having run.
         registry.load_handlers()
         engine.set_wake_event(_wake)
 

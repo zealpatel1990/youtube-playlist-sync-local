@@ -233,6 +233,112 @@ def fragment_jobs(request):
     return render(request, "music/_jobs.html", _jobs())
 
 
+#: Everything `_job_row.html` renders. `payload` and `error` are deliberately
+#: absent: an error can be 4000 characters and a payload arbitrary JSON, and
+#: multiplying that by a page of rows is exactly the kind of pointless transfer
+#: this app avoids. Both are fetched per job by `job_detail`.
+JOB_LIST_FIELDS = (
+    "id", "kind", "state", "attempts", "max_attempts",
+    "message", "created_at", "started_at", "finished_at",
+)
+
+JOB_STATE_FILTERS = (
+    ("", "All"),
+    ("active", "Active"),
+    (JobState.SUCCEEDED, "Succeeded"),
+    (JobState.FAILED, "Failed"),
+)
+
+
+def jobs(request):
+    """The job log: what ran, what it said, and what went wrong.
+
+    The `Job` table is the app's audit trail — every scan, identification, move
+    and restart passes through it — so this is where you look when something did
+    not happen. Rows carry only summary columns; the payload and the full error
+    live behind the detail modal, one job at a time.
+    """
+    state = request.GET.get("state", "")
+    queryset = Job.objects.all()
+    if state == "active":
+        queryset = queryset.filter(state__in=JobState.active())
+    elif state in {choice for choice, _ in JOB_STATE_FILTERS} and state:
+        queryset = queryset.filter(state=state)
+
+    # -id rather than -created_at: same order (ids are monotonic), but it reads
+    # straight off the primary key instead of the created_at index.
+    page = _paginate(queryset.only(*JOB_LIST_FIELDS).order_by("-id"), request)
+
+    context = {
+        "nav": "jobs",
+        "page_obj": page,
+        "jobs": page.object_list,
+        "state": state,
+        "filters": _job_filters(state),
+    }
+    if request.headers.get("HX-Request"):
+        return render(request, "music/_job_list.html", context)
+    return render(request, "music/jobs.html", context)
+
+
+def _job_filters(current: str) -> list[dict]:
+    """The filter pills, counts included, resolved here rather than in the
+    template — a dictionary lookup by variable key needs a custom filter, and
+    the template has no business knowing how the counts are keyed.
+
+    One grouped query covers every pill.
+    """
+    rows = Job.objects.values("state").annotate(n=Count("id"))
+    per_state = {row["state"]: row["n"] for row in rows}
+    totals = {
+        "": sum(per_state.values()),
+        "active": sum(per_state.get(s, 0) for s in JobState.active()),
+        **per_state,
+    }
+    return [
+        {
+            "value": value,
+            "label": label,
+            "count": totals.get(value, 0),
+            "active": current == value,
+        }
+        for value, label in JOB_STATE_FILTERS
+    ]
+
+
+def job_detail(request, pk: int):
+    """One job in full, loaded into the modal body by htmx.
+
+    Fetched on demand for exactly the job asked about, which is what keeps the
+    list page cheap.
+    """
+    job = get_object_or_404(Job, pk=pk)
+    try:
+        payload = json.dumps(job.payload, indent=2, sort_keys=True)
+    except (TypeError, ValueError):
+        payload = str(job.payload)
+    return render(
+        request,
+        "music/_job_detail.html",
+        {
+            "job": job,
+            "payload": payload,
+            "duration": job.duration_seconds,
+            "spec": _job_spec(job.kind),
+        },
+    )
+
+
+def _job_spec(kind: str):
+    """The handler's registered description, when it has one."""
+    try:
+        from music.jobs import registry
+
+        return registry.get(kind)
+    except Exception:
+        return None
+
+
 def library_review(request):
     """The organize manifest: every planned move, before any of them happens.
 

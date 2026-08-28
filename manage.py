@@ -19,9 +19,18 @@ except ImportError:
 
 def main() -> None:
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "music_manager.settings")
-    # Management commands run in their own process and must never start a
-    # second worker pool competing with the live service for jobs.
-    os.environ.setdefault("MUSIC_MANAGER_DISABLE_WORKERS", "1")
+
+    # A management command runs in its own process and must never start a
+    # second worker pool competing with the live service for jobs — with one
+    # exception. `runserver` IS the development server, and the whole design is
+    # that workers live inside the web process, so disabling them there would
+    # leave a dashboard whose buttons queue work nothing ever runs.
+    #
+    # This only gates the worker threads. Job handlers are registered in
+    # MusicConfig.ready() regardless, because anything that enqueues needs the
+    # registry whether or not this process will run the work.
+    if "runserver" not in sys.argv:
+        os.environ.setdefault("MUSIC_MANAGER_DISABLE_WORKERS", "1")
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

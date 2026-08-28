@@ -233,6 +233,17 @@ SYNC_INTERVAL_MINUTES = env_int("SYNC_INTERVAL_MINUTES", default=0, minimum=0)
 #: 0 disables the periodic library rescan.
 RESCAN_INTERVAL_MINUTES = env_int("RESCAN_INTERVAL_MINUTES", default=0, minimum=0)
 
+#: Upgrade yt-dlp on a schedule; 0 (default) means only the dashboard button.
+#:
+#: yt-dlp alone gets this. It is the one dependency that rots on someone else's
+#: timetable — YouTube changes and downloads simply stop — and the fix is always
+#: the same upgrade. Everything else is pinned in requirements.txt and moves
+#: when a human decides it should, because an unattended upgrade of a tagging or
+#: web library on a 24/7 Pi risks breaking a service to fix nothing.
+#:
+#: An upgrade restarts the service, so a run in the small hours is kindest.
+YTDLP_AUTO_UPDATE_HOURS = env_int("YTDLP_AUTO_UPDATE_HOURS", default=0, minimum=0)
+
 #: Retention for terminal Job rows; the reaper prunes older ones so the table
 #: cannot grow without bound on the SD card.
 JOB_RETENTION_DAYS = env_int("JOB_RETENTION_DAYS", default=14, minimum=1)

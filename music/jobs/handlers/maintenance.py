@@ -40,8 +40,17 @@ log = logging.getLogger("music.jobs.maintenance")
 def update_ytdlp(job_obj) -> str:
     from music.ingest import youtube
 
+    before = youtube.ytdlp_version()
     version = youtube.upgrade_ytdlp()
-    message = f"yt-dlp upgraded to {version}; restarting service"
+
+    # Nothing changed — do not restart. This matters most for the scheduled
+    # run (YTDLP_AUTO_UPDATE_HOURS): pip reports success whether or not it had
+    # anything to do, so restarting unconditionally would bounce the service on
+    # every tick, killing whatever was downloading, to install nothing.
+    if before and version and before == version:
+        return f"yt-dlp is already {version}; no restart needed"
+
+    message = f"yt-dlp upgraded {before or 'unknown'} -> {version}; restarting service"
 
     # Persist the outcome BEFORE anything can kill this process.
     Job.objects.filter(pk=job_obj.pk).update(

@@ -16,6 +16,8 @@ urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("review/", views.library_review, name="library_review"),
     path("duplicates/", views.duplicates, name="duplicates"),
+    path("jobs/", views.jobs, name="jobs"),
+    path("jobs/<int:pk>/", views.job_detail, name="job_detail"),
 
     # --- live updates --------------------------------------------------
     path("events/", views.stream_events, name="stream_events"),
