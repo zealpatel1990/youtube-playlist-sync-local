@@ -1,16 +1,43 @@
-# Keep the (QEMU-emulated) build context small and reproducible.
+# Keep the build context small. This matters more than usual here: the image is
+# built under QEMU emulation, and every byte of context is transferred before
+# the build starts.
 .venv
 .git
+.github
 __pycache__
 **/__pycache__
 *.pyc
+*.pyo
+
+# The local test sandbox. It is bind-mounted at runtime by docker-compose, so
+# it must never be COPYed in — and it holds gigabytes of downloaded audio.
+_devdata/
+
+# Databases and their WAL sidecars
 db.sqlite3
 db.sqlite3-*
 *.sqlite3
 *.sqlite3-*
-staticfiles
-downloads
-staging
+
+# Generated or runtime state
+staticfiles/
+downloads/
+staging/
 .music_manager.lock
 *.log
+
+# Secrets and local config: the container gets its environment from compose.
 .env
+
+# The old app being replaced. Not in INSTALLED_APPS, so it is dead weight in
+# the image; remove this line if you ever need to run migrate_legacy in here.
+playlist/
+test_tagger.py
+
+# Documentation and editor cruft
+docs/
+*.md
+!Readme.md
+.vscode/
+.idea/
+.DS_Store

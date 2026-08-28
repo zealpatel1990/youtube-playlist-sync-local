@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
+from django.conf import settings
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from music.ingest import youtube
@@ -335,9 +336,44 @@ class DownloadTests(TestCase):
         # bar into journald — thousands of SD-card writes per track.
         self.assertTrue(opts["quiet"])
         self.assertEqual(opts["socket_timeout"], youtube.SOCKET_TIMEOUT)
-        self.assertEqual(opts["postprocessors"][0]["preferredquality"], "192")
         self.assertNotIn("ffmpeg_location", opts)
         self.assertEqual(holder["ydl"].extract_calls, [(self.video.url, True)])
+
+    def test_native_format_runs_no_postprocessor(self):
+        """The default must not transcode.
+
+        Re-encoding to MP3 is the most expensive step on a Pi — libmp3lame is
+        effectively single-threaded, and on a 900MHz core a four-minute track
+        can take longer to encode than to fetch. It is also a second lossy pass
+        over YouTube's already-lossy Opus.
+        """
+        info = self._info_for("vid_public0.mp3")
+        patcher, holder = patch_ydl(info)
+        with patcher:
+            youtube.download_audio(self.video, self.dest)
+        self.assertEqual(holder["ydl"].opts["postprocessors"], [])
+
+    @override_settings(AUDIO_FORMAT="mp3", AUDIO_QUALITY="192")
+    def test_mp3_format_adds_the_extract_audio_postprocessor(self):
+        info = self._info_for("vid_public0.mp3")
+        patcher, holder = patch_ydl(info)
+        with patcher:
+            youtube.download_audio(self.video, self.dest)
+        post = holder["ydl"].opts["postprocessors"]
+        self.assertEqual(len(post), 1)
+        self.assertEqual(post[0]["key"], "FFmpegExtractAudio")
+        self.assertEqual(post[0]["preferredcodec"], "mp3")
+        self.assertEqual(post[0]["preferredquality"], "192")
+
+    def test_fragments_are_fetched_concurrently(self):
+        info = self._info_for("vid_public0.mp3")
+        patcher, holder = patch_ydl(info)
+        with patcher:
+            youtube.download_audio(self.video, self.dest)
+        self.assertEqual(
+            holder["ydl"].opts["concurrent_fragment_downloads"],
+            settings.DOWNLOAD_CONCURRENT_FRAGMENTS,
+        )
 
     @override_settings(FFMPEG_LOCATION="/usr/bin")
     def test_ffmpeg_location_is_passed_when_set(self):

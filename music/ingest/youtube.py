@@ -366,13 +366,25 @@ def download_audio(
     opts = {
         "format": "bestaudio/best",
         "outtmpl": str(dest_dir / f"{video.video_id}.%(ext)s"),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": str(settings.AUDIO_QUALITY),
-            }
-        ],
+        # AUDIO_FORMAT=native keeps YouTube's own stream and runs no
+        # postprocessor at all. That removes the single most expensive step on
+        # a Pi: libmp3lame is effectively single-threaded, and on a 900MHz
+        # Cortex-A7 encoding a four-minute track can take longer than fetching
+        # it. It also avoids a second lossy pass over already-lossy Opus.
+        "postprocessors": (
+            [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": str(settings.AUDIO_QUALITY),
+                }
+            ]
+            if settings.AUDIO_FORMAT == "mp3"
+            else []
+        ),
+        # DASH audio comes as many small fragments; a few in flight keeps the
+        # link busy instead of paying a round trip per fragment.
+        "concurrent_fragment_downloads": settings.DOWNLOAD_CONCURRENT_FRAGMENTS,
         # The previous version left this False, so every download streamed
         # yt-dlp's progress bar into journald: thousands of lines per track,
         # every one of them a write to the SD card.

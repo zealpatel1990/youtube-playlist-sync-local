@@ -169,6 +169,32 @@ PIP_PATH = env_str("PIP_PATH", default="pip")
 FFMPEG_LOCATION = env_str("FFMPEG_LOCATION", default="")
 AUDIO_QUALITY = env_str("AUDIO_QUALITY", default="192")
 
+#: "native" (default) keeps YouTube's own audio stream — usually Opus in a WebM
+#: container, sometimes AAC in m4a — and never re-encodes.
+#: "mp3" re-encodes to MP3 at AUDIO_QUALITY.
+#:
+#: native is faster by a wide margin on a Pi. The download itself is network
+#: bound and takes what it takes; the transcode is CPU bound, libmp3lame is
+#: effectively single-threaded, and on a 900MHz Cortex-A7 it runs at a small
+#: multiple of realtime — so a four-minute song can spend longer being encoded
+#: than downloaded. Skipping it removes the dominant cost.
+#:
+#: It is also better audio: YouTube's Opus is already lossy, and MP3 is a second
+#: lossy pass over it. And the files are smaller.
+#:
+#: Choose "mp3" only for a player that genuinely cannot read Opus. Plex reads
+#: Opus, m4a and WebM; mutagen tags all of them.
+AUDIO_FORMAT = env_str(
+    "AUDIO_FORMAT", default="native", choices=("native", "mp3")
+)
+
+#: DASH audio arrives as many small fragments, so fetching a few at once fills
+#: the pipe on a high-latency link. Kept modest: each one is a socket and a
+#: buffer, and the Pi has 1GB.
+DOWNLOAD_CONCURRENT_FRAGMENTS = env_int(
+    "DOWNLOAD_CONCURRENT_FRAGMENTS", default=4, minimum=1, maximum=16
+)
+
 
 # --------------------------------------------------------------------------
 # Identification providers

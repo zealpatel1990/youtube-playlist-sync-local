@@ -46,9 +46,21 @@ shazamio==0.8.1
 google-genai==2.20.0
 
 # --- Not dependencies -----------------------------------------------------
-# AcoustID needs NO Python package: it is the fpcalc binary plus a plain HTTP
-# lookup over stdlib urllib, which avoids another compiled binding on ARM.
-#     sudo apt install libchromaprint-tools ffmpeg
+# SYSTEM PACKAGES the Pi needs. Verified in the ARMv7 container:
+#
+#     sudo apt install ffmpeg libchromaprint-tools libopenblas0
+#
+#   ffmpeg               yt-dlp's audio handling, and Shazam's decoding
+#   libchromaprint-tools provides fpcalc, which AcoustID fingerprinting needs.
+#                        AcoustID needs NO Python package — it is this binary
+#                        plus a plain HTTP lookup over stdlib urllib, which
+#                        avoids another compiled binding on ARM.
+#   libopenblas0         numpy's ARM wheel links against it, and shazamio
+#                        imports numpy. Miss it and every Shazam call fails at
+#                        import with "libopenblas.so.0: cannot open shared
+#                        object file", which the provider records as "no match"
+#                        — so recognition quietly does nothing. x86 numpy wheels
+#                        bundle their own BLAS, so this only bites on ARM.
 #
 # Deliberately absent, and why:
 #   djangorestframework — the old read-only JSON endpoints were unauthenticated

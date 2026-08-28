@@ -51,7 +51,24 @@ LOOKUP_URL = "https://api.acoustid.org/v2/lookup"
 #: disc numbers — the entire point of this provider — are simply absent from
 #: the response. `compress` asks for a gzipped body, which urllib does not
 #: transparently decode; `_read_body` handles that.
-LOOKUP_META = "recordings+releases+tracks+compress"
+#: Meta flags, SPACE separated — not "+" separated.
+#:
+#: https://acoustid.org/webservice says the values are "combined with space
+#: separation", and this is the difference between the provider working and
+#: silently returning nothing. urlencode percent-encodes a literal "+" as
+#: "%2B", so "recordings+releases" reaches AcoustID as the single unknown flag
+#: `recordings+releases` rather than as two flags, and the response comes back
+#: with results but zero recordings attached. A space encodes to "+" on the
+#: wire, which is what the server expects.
+#:
+#: Measured against one real file: "recordings+releases+tracks+compress" gave
+#: 11 results and 0 recordings; "recordings releases tracks compress" gave 11
+#: results, 11 recordings and 103 releases — including the track and disc
+#: numbers that are the whole reason for using AcoustID over Shazam.
+#:
+#: `tracks` is what carries medium/track position; `compress` shrinks a
+#: response that routinely runs to hundreds of releases.
+LOOKUP_META = "recordings releases tracks compress"
 
 #: Seconds of audio Chromaprint reads. AcoustID's own index is built from the
 #: first two minutes, so more buys no accuracy and costs real ARMv7 CPU.
@@ -180,20 +197,43 @@ class AcoustidProvider(Provider):
             log.warning("acoustid: could not run %s: %s", settings.FPCALC_PATH, exc)
             return None
 
-        if completed.returncode != 0:
-            log.warning(
-                "acoustid: fpcalc exited %s on %s: %s",
-                completed.returncode, ctx.path, (completed.stderr or "").strip()[:300],
-            )
-            return None
-
+        # Deliberately NOT gated on the exit code. fpcalc routinely exits
+        # non-zero while still writing a perfectly good fingerprint to stdout —
+        # a real 20-second MP3 produces "ERROR: Error decoding audio frame (End
+        # of file)" on stderr and exit status 3, because it reports trouble
+        # decoding the final partial frame after it has already fingerprinted
+        # the audio. Treating that as failure disabled AcoustID on every file,
+        # which is invisible from the outside: the chain simply falls through to
+        # Shazam and Gemini and looks like it is working.
+        #
+        # The output is the authority. A fingerprint means success whatever the
+        # exit code said; no fingerprint is a failure whatever it said.
         try:
             data = json.loads(completed.stdout or "{}")
         except ValueError:
-            log.warning("acoustid: fpcalc emitted unparseable JSON for %s", ctx.path)
+            log.warning(
+                "acoustid: fpcalc produced no usable output for %s (exit %s): %s",
+                ctx.path, completed.returncode,
+                (completed.stderr or "").strip()[:300],
+            )
             return None
 
         fingerprint = str(data.get("fingerprint") or "")
+        if not fingerprint:
+            log.warning(
+                "acoustid: fpcalc returned no fingerprint for %s (exit %s): %s",
+                ctx.path, completed.returncode,
+                (completed.stderr or "").strip()[:300],
+            )
+            return None
+
+        if completed.returncode != 0:
+            log.debug(
+                "acoustid: fpcalc exited %s but produced a fingerprint for %s: %s",
+                completed.returncode, ctx.path,
+                (completed.stderr or "").strip()[:200],
+            )
+
         # fpcalc reports a float; Track.duration is an integer number of seconds.
         duration = int(round(float(data.get("duration") or 0.0)))
         return fingerprint, duration

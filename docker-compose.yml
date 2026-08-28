@@ -1,0 +1,77 @@
+# A Raspberry Pi 2, near enough to be useful.
+#
+#   docker compose up --build          start it (first build is slow: QEMU)
+#   docker compose logs -f             follow it
+#   docker compose exec app sh         a shell inside
+#   docker compose run --rm app python manage.py test music
+#   docker compose down                stop it
+#
+# Then open http://localhost:8001/
+#
+# What this reproduces that a native run cannot: the 32-bit ARMv7 architecture
+# (so armv7 wheel availability is exercised for real), a 1 GB memory ceiling,
+# and ffmpeg + fpcalc actually present, so downloads and AcoustID fingerprinting
+# work end to end instead of failing at the first external binary.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm/v7
+    image: music-manager:pi
+    container_name: music-manager-pi
+
+    ports:
+      - "8000:8000"          # Stop any `manage.py runserver` on 8000 first;
+                             # only one of them can hold the port.
+
+    # The Pi's disks, mapped onto the sandbox in _devdata/ (gitignored).
+    # Same shape as the real box: two scan roots feeding one library.
+    volumes:
+      - ./_devdata/music:/media/music                   # <- /media/pi/500gb hdd/Music
+      - ./_devdata/youtube_music:/media/youtube_music   # <- /media/pi/500gb hdd/Youtube_Music
+      - ./_devdata/library:/media/library               # <- LIBRARY_ROOT
+      - ./_devdata/staging:/media/staging               # <- DOWNLOAD_STAGING
+      - ./_devdata/db:/data                             # <- the SQLite file
+
+    environment:
+      DJANGO_SECRET_KEY: container-dev-key-not-for-any-real-deployment
+      DJANGO_DEBUG: "0"
+      DJANGO_ALLOWED_HOSTS: "*"
+      TIME_ZONE: UTC
+      LOG_LEVEL: INFO
+
+      # One worker thread, as the Pi should run. A single ffmpeg transcode
+      # already saturates a core there, and under emulation it is worse.
+      WORKER_THREADS: "1"
+      WORKER_IDLE_WAKE_SECONDS: "300"
+      JOB_LEASE_SECONDS: "1800"      # generous: emulated downloads are slow
+      WORKER_COOLDOWN_SECONDS: "5"
+
+      # Nothing runs on a timer unless you ask for it.
+      SYNC_INTERVAL_MINUTES: "0"
+      RESCAN_INTERVAL_MINUTES: "0"
+      YTDLP_AUTO_UPDATE_HOURS: "0"
+      AUTO_ORGANIZE: "0"
+      DUPLICATE_POLICY: report-only
+
+      # The full chain works in here: ffmpeg and fpcalc are installed, so the
+      # only thing gating a provider is whether its key is present.
+      IDENTIFY_CHAIN: "tags,acoustid,shazam,gemini"
+      SHAZAM_ENABLED: "1"
+      GEMINI_DAILY_BUDGET: "50"      # deliberately small while testing
+
+      # Passed through from your shell; unset keys just skip that provider.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+      PLAYLIST_URL: "${PLAYLIST_URL:-}"
+
+    # A Pi 2 has 1 GB of RAM shared with the OS and four Cortex-A7 cores.
+    # The memory ceiling is the honest part — an OOM here is an OOM there.
+    # Docker cannot emulate slow cores, but QEMU is slow enough on its own.
+    mem_limit: 1g
+    memswap_limit: 1g        # equal to mem_limit = no swap, like a Pi with none
+    cpus: 4
+
+    restart: unless-stopped

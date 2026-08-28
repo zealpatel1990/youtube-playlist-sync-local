@@ -107,10 +107,69 @@ python manage.py identify_track --path FILE   # identify one file, print the res
 python manage.py migrate_legacy --apply       # import rows from the previous version
 ```
 
+## Testing against a simulated Pi
+
+The app is developed on a laptop and deployed to 32-bit ARMv7, which is a
+genuinely different platform — not just a slower one. `docker-compose.yml`
+builds and runs the real thing under emulation:
+
+```bash
+docker compose up --build       # first build is slow: everything runs under QEMU
+```
+
+Then open <http://localhost:8000/>.
+
+This reproduces three things a native run cannot:
+
+- **The architecture.** ARMv7, so armv7 wheel availability is exercised for
+  real. Two dependencies carry native code (`pydantic-core`'s Rust core, and
+  `websockets`); if piwheels lacks a wheel for the Pi's Python version, the
+  build discovers it here rather than on the Pi.
+- **The memory ceiling.** 1 GB with no swap, as on the hardware. An OOM in the
+  container is an OOM on the Pi.
+- **The external binaries.** `ffmpeg` and `fpcalc` are installed, so downloads
+  and AcoustID fingerprinting run end to end instead of failing at the first
+  missing executable.
+
+Your `GEMINI_API_KEY`, `ACOUSTID_API_KEY` and `PLAYLIST_URL` pass through from
+the shell; an unset key simply skips that provider.
+
+```bash
+docker compose logs -f                                   # follow it
+docker compose exec app sh                               # a shell inside
+docker compose run --rm app python manage.py test music  # the suite, on ARM
+docker compose down                                      # stop
+```
+
+## The local sandbox
+
+`_devdata/` mirrors the Pi's layout so local testing and the real thing differ
+only in paths. It is gitignored, and `scripts/devdata.py` rebuilds it:
+
+```bash
+python scripts/devdata.py seed            # create the tree and sample tracks
+python scripts/devdata.py status          # what is in there now
+python scripts/devdata.py clean-staging   # drop half-finished downloads
+python scripts/devdata.py reset --yes     # wipe it and start over
+```
+
+| Sandbox | Stands in for |
+|---|---|
+| `_devdata/music/` | `/media/pi/500gb hdd/Music` |
+| `_devdata/youtube_music/` | `/media/pi/500gb hdd/Youtube_Music` |
+| `_devdata/library/` | `LIBRARY_ROOT` |
+| `_devdata/staging/` | `DOWNLOAD_STAGING` |
+
+The sample tracks are synthesised MPEG frames, not copyrighted audio, and cover
+the cases that actually break things: a flat dump with no album folders, a
+multi-disc set, a compilation with per-track performers, an untagged file, a
+title full of illegal characters, and a byte-identical duplicate.
+
 ## Tests
 
 ```bash
 python manage.py test music
 ```
 
-Always scope to `music`. A bare `manage.py test` discovers stray `test*.py` files at the repo root.
+Always scope to `music`. A bare `manage.py test` discovers stray `test*.py`
+files at the repo root.

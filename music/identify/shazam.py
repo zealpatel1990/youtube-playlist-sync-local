@@ -21,10 +21,15 @@ created and closed around it — see `_recognize`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import shutil
+import subprocess
+import tempfile
 import importlib.util
 import logging
 import re
 import threading
+from pathlib import Path
 
 from django.conf import settings
 
@@ -122,6 +127,11 @@ def _recognize(ctx: IdentifyContext, timeout: float) -> dict:
     return asyncio.run(_recognize_async(ctx, timeout))
 
 
+#: Seconds of audio sent to Shazam. Its own app matches from a few seconds of
+#: microphone input; more than this buys nothing and costs decode time.
+EXCERPT_SECONDS = 15
+
+
 async def _recognize_async(ctx: IdentifyContext, timeout: float) -> dict:
     # Imported here, inside the running loop: shazamio builds an aiohttp client
     # whose connector binds to whatever loop is current at construction time, so
@@ -131,7 +141,76 @@ async def _recognize_async(ctx: IdentifyContext, timeout: float) -> dict:
     from shazamio import Shazam
 
     shazam = Shazam()
-    return await asyncio.wait_for(shazam.recognize(str(ctx.path)), timeout=timeout)
+    with _excerpt(ctx.path) as source:
+        return await asyncio.wait_for(shazam.recognize(str(source)), timeout=timeout)
+
+
+@contextlib.contextmanager
+def _excerpt(path: Path):
+    """Yield a short mono WAV of `path`, falling back to the file itself.
+
+    Two reasons this is not just `shazam.recognize(path)`:
+
+    **Format.** shazamio decodes with symphonia, which reads MP3, WAV, FLAC and
+    friends — but not the WebM/Opus that YouTube actually serves and that
+    AUDIO_FORMAT=native keeps. Handed one, it tries to demux it as MP3 and
+    produces thousands of "skipping junk" warnings and no match. Letting ffmpeg
+    do the decoding makes this provider work on whatever the library holds
+    instead of only on MP3.
+
+    **Cost.** Shazam matches from a few seconds. Decoding fifteen seconds at
+    16kHz mono is far cheaper than a whole four-minute track — which matters on
+    a Pi, where this is the CPU-heaviest provider in the chain — and it uploads
+    a fraction of the bytes.
+
+    If ffmpeg is unavailable the original path is yielded, so an MP3 library
+    still works exactly as before.
+    """
+    ffmpeg = _ffmpeg_binary()
+    if ffmpeg is None:
+        yield path
+        return
+
+    handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    handle.close()
+    target = Path(handle.name)
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-t", str(EXCERPT_SECONDS),
+                "-i", str(path),
+                "-ac", "1",          # mono: Shazam's fingerprint is mono anyway
+                "-ar", "16000",      # 16kHz is ample for recognition
+                "-c:a", "pcm_s16le",
+                "-y", str(target),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if completed.returncode == 0 and target.stat().st_size > 1024:
+            yield target
+        else:
+            log.debug(
+                "shazam: could not excerpt %s (%s); using the file as-is: %s",
+                path, completed.returncode, (completed.stderr or "").strip()[:200],
+            )
+            yield path
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("shazam: excerpt failed for %s (%s); using the file as-is", path, exc)
+        yield path
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def _ffmpeg_binary() -> str | None:
+    configured = getattr(settings, "FFMPEG_LOCATION", "")
+    if configured:
+        candidate = Path(configured)
+        # The setting may name the directory or the executable itself.
+        binary = candidate / "ffmpeg" if candidate.is_dir() else candidate
+        if binary.exists():
+            return str(binary)
+    return shutil.which("ffmpeg")
 
 
 def parse_recognition(response: dict | None) -> TrackMetadata | None:
