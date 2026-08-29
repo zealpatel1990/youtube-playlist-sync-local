@@ -12,7 +12,7 @@ obvious question after reading it ("which jobs?") is one click away.
 
 {% if active_jobs %}
     <a href="{% url 'jobs' %}?state=active" class="text-decoration-none"
-       title="{% for job in active_jobs %}{{ job.kind }} ({{ job.state|lower }}){% if not forloop.last %}, {% endif %}{% endfor %}&#10;&#10;Click to see the job log.">
+       title="{% for job in active_jobs %}{{ job.kind }}{% if job.message %} — {{ job.message }}{% endif %}&#10;{% endfor %}&#10;Click to see the job log.">
         <span class="badge text-bg-info d-inline-flex align-items-center gap-1">
             {% if running_count %}
             <span class="spinner-border spinner-border-sm" style="width:.7rem;height:.7rem;"
@@ -22,6 +22,15 @@ obvious question after reading it ("which jobs?") is one click away.
             {% if running_count %}running{% else %}queued{% endif %}
         </span>
     </a>
+    {% comment %}
+    The newest running job's own words, next to the badge. `message` is written
+    by the same throttled heartbeat that extends the lease, so live progress
+    costs no extra query.
+    {% endcomment %}
+    {% for job in active_jobs %}{% if job.state == "RUNNING" and job.message %}
+        <span class="small text-body-secondary text-truncate d-none d-lg-inline"
+              style="max-width: 26rem;" title="{{ job.message }}">{{ job.message }}</span>
+    {% endif %}{% endfor %}
 {% else %}
     <a href="{% url 'jobs' %}" class="text-decoration-none" title="Nothing running. Click to see the job log.">
         <span class="badge bg-body-secondary text-body-secondary border">

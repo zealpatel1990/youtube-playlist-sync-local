@@ -16,8 +16,8 @@ log = logging.getLogger("music.jobs.library")
 def scan_all(job_obj) -> str:
     from music.library import scanner
 
-    def heartbeat() -> None:
-        engine.heartbeat(job_obj)
+    def heartbeat(status: str = "") -> None:
+        engine.heartbeat(job_obj, status)
 
     results = scanner.scan_all(heartbeat=heartbeat)
     total_added = sum(result.added for result in results.values())
@@ -40,8 +40,8 @@ def scan_root(job_obj) -> str:
     if not raw_path:
         return "no path in payload"
 
-    def heartbeat() -> None:
-        engine.heartbeat(job_obj)
+    def heartbeat(status: str = "") -> None:
+        engine.heartbeat(job_obj, status)
 
     result = scanner.scan_root(Path(raw_path), heartbeat=heartbeat)
     if result.added:

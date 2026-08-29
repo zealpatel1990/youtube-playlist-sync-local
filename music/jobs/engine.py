@@ -91,12 +91,20 @@ def claim_next() -> Job | None:
     return None
 
 
-def heartbeat(job: Job) -> None:
-    """Extend a lease. Long handlers call this so the reaper leaves them alone."""
+def heartbeat(job: Job, status: str = "") -> None:
+    """Extend a lease, optionally recording what the job is doing right now.
+
+    `status` rides along on the write that was happening anyway, so live
+    progress costs no extra query. Callers must already be throttling their
+    heartbeats — a progress hook that fires per chunk must not reach here.
+    """
     lease_until = timezone.now() + timedelta(seconds=settings.JOB_LEASE_SECONDS)
-    Job.objects.filter(id=job.pk, state=JobState.RUNNING).update(
-        lease_expires_at=lease_until
-    )
+    fields = {"lease_expires_at": lease_until}
+    if status:
+        fields["message"] = status[:2000]
+    Job.objects.filter(id=job.pk, state=JobState.RUNNING).update(**fields)
+    if status:
+        events.bump("jobs")
 
 
 def finish_success(job: Job, message: str = "") -> None:

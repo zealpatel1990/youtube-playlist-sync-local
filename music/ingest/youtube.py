@@ -304,6 +304,12 @@ def download_audio(
         # AUDIO_FORMAT=native keeps YouTube's stream and runs no postprocessor:
         # single-threaded libmp3lame can take longer than the download itself
         # on a Pi, and it is a second lossy pass over already-lossy Opus.
+        # native: remux into Ogg without re-encoding. yt-dlp hands back WebM,
+        # which mutagen cannot tag AT ALL — no title, no artist, no cover art,
+        # leaving the filename as the only metadata and Plex reads tags over
+        # filenames. Remuxing is a container swap with `-c:a copy`, so it keeps
+        # the whole point of native (no transcode, no second lossy pass) while
+        # producing a file that can actually carry tags.
         "postprocessors": (
             [
                 {
@@ -313,7 +319,7 @@ def download_audio(
                 }
             ]
             if settings.AUDIO_FORMAT == "mp3"
-            else []
+            else [{"key": "FFmpegVideoRemuxer", "preferedformat": "opus"}]
         ),
         # DASH audio comes as many small fragments; a few in flight keeps the
         # link busy instead of paying a round trip per fragment.
@@ -388,10 +394,12 @@ def _downloaded_path(info: Any, dest_dir: Path, video_id: str) -> Path | None:
     return matches[0]
 
 
-def _heartbeat_hook(heartbeat: Callable[[], None] | None) -> Callable[[dict], None]:
+def _heartbeat_hook(heartbeat: Callable[..., None] | None) -> Callable[[dict], None]:
     """Wrap `heartbeat` in a yt-dlp hook that fires at most once per interval.
 
     Progress hooks run several times a second; each heartbeat is a db write.
+    The hook also passes a short status line, which the caller records on the
+    job so the dashboard shows what is happening instead of an empty row.
     """
     state = {"last": 0.0}
 
@@ -402,17 +410,47 @@ def _heartbeat_hook(heartbeat: Callable[[], None] | None) -> Callable[[dict], No
         if state["last"] and now - state["last"] < HEARTBEAT_INTERVAL:
             return
         state["last"] = now
-        _beat(heartbeat)
+        _beat(heartbeat, _describe_progress(status))
 
     return hook
 
 
-def _beat(heartbeat: Callable[[], None] | None) -> None:
+def _describe_progress(status: dict) -> str:
+    """A one-line summary of a yt-dlp progress or postprocessor event."""
+    kind = status.get("status") or ""
+    if kind == "finished":
+        return "downloaded; converting audio"
+    if kind == "processing":
+        return f"converting audio ({status.get('postprocessor') or 'ffmpeg'})"
+    if kind != "downloading":
+        return kind or ""
+
+    done = status.get("downloaded_bytes") or 0
+    total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+    speed = status.get("speed") or 0
+    parts = []
+    if total:
+        parts.append(f"downloading {done * 100 // total}%")
+        parts.append(f"{done / 1048576:.1f}/{total / 1048576:.1f} MB")
+    else:
+        parts.append(f"downloading {done / 1048576:.1f} MB")
+    if speed:
+        parts.append(f"{speed / 1024:.0f} KB/s")
+    return "  ".join(parts)
+
+
+def _beat(heartbeat: Callable[..., None] | None, status: str = "") -> None:
     """A lease extension must never be the thing that aborts a download."""
     if heartbeat is None:
         return
     try:
-        heartbeat()
+        heartbeat(status) if status else heartbeat()
+    except TypeError:
+        # A caller that only accepts a no-arg heartbeat.
+        try:
+            heartbeat()
+        except Exception:
+            log.exception("heartbeat failed; continuing the download")
     except Exception:
         log.exception("heartbeat failed; continuing the download")
 

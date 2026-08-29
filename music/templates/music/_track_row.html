@@ -12,6 +12,20 @@ the field heading, which is why every cell carries one.
 
 <tr>
     <td class="cell-title">
+      <div class="d-flex gap-2">
+        {% comment %}
+        Artwork is loaded straight from the provider's CDN rather than proxied:
+        the Pi should not spend a request thread relaying images the browser can
+        fetch itself. lazy + async so a page of fifty costs nothing until seen.
+        {% endcomment %}
+        <div class="cover-thumb flex-shrink-0">
+            {% if track.cover_url %}
+                <img src="{{ track.cover_url }}" alt="" loading="lazy" decoding="async"
+                     onerror="this.closest('.cover-thumb').classList.add('cover-missing');this.remove();">
+            {% endif %}
+            {% if not track.cover_url %}<i class="bi bi-music-note-beamed"></i>{% endif %}
+        </div>
+        <div class="min-w-0 flex-grow-1">
         <div class="fw-semibold clamp-2">
             {% if track.title %}{{ track.title }}{% else %}{{ track.path|basename }}{% endif %}
         </div>
@@ -20,6 +34,18 @@ the field heading, which is why every cell carries one.
             {% if track.album %}<span class="text-body-tertiary">·</span> {{ track.album }}{% endif %}
             {% if not track.artist and not track.album %}<span class="fst-italic">no metadata yet</span>{% endif %}
         </div>
+        {% if track.track_no or track.year or track.is_compilation %}
+        <div class="small text-body-tertiary">
+            {% if track.track_no %}
+                <span title="disc {{ track.disc_no|default:1 }}, track {{ track.track_no }}">
+                    {% if track.disc_no > 1 %}{{ track.disc_no }}·{% endif %}{{ track.track_no }}
+                </span>
+            {% endif %}
+            {% if track.year %}<span class="ms-1">{{ track.year }}</span>{% endif %}
+            {% if track.is_compilation %}<span class="badge bg-body-secondary text-body-secondary border ms-1">Various Artists</span>{% endif %}
+            {% if track.cover_embedded %}<i class="bi bi-image ms-1" title="cover art embedded in the file"></i>{% endif %}
+        </div>
+        {% endif %}
         <div class="path-text text-body-tertiary text-truncate" title="{{ track.path }}">{{ track.path }}</div>
         {% if track.state == "FAILED" and track.last_error %}
             <div class="small text-danger text-truncate" title="{{ track.last_error }}">
@@ -27,6 +53,8 @@ the field heading, which is why every cell carries one.
                 attempt {{ track.fail_count }} · {{ track.last_error }}
             </div>
         {% endif %}
+        </div>
+      </div>
     </td>
 
     <td data-label="State">

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
 
+from typing import Callable
+
 from django.conf import settings
 
 log = logging.getLogger("music.identify")
@@ -183,11 +185,24 @@ def reset_chain() -> None:
         _chain_cache = None
 
 
-def identify(ctx: IdentifyContext) -> TrackMetadata | None:
-    """Run the chain and return the first result that clears the bar, or None."""
+def identify(
+    ctx: IdentifyContext,
+    *,
+    on_provider: Callable[[str], None] | None = None,
+) -> TrackMetadata | None:
+    """Run the chain and return the first result that clears the bar, or None.
+
+    `on_provider` is called with each provider's name before it runs, so a
+    caller can report which tier a slow identification is currently in.
+    """
     threshold = settings.IDENTIFY_MIN_CONFIDENCE
 
     for provider in get_chain():
+        if on_provider is not None:
+            try:
+                on_provider(provider.name)
+            except Exception:
+                log.debug("on_provider callback failed", exc_info=True)
         try:
             result = provider.identify(ctx)
         except Exception:

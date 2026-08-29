@@ -19,6 +19,7 @@ _IDENTIFIED_FIELDS = [
     "title", "artist", "album", "album_artist",
     "track_no", "disc_no", "year", "genre", "is_compilation",
     "musicbrainz_recording_id", "musicbrainz_release_id",
+    "cover_url",
     "identified_by", "confidence",
     "state", "fail_count", "retry_at", "last_error",
     "updated_at",
@@ -69,8 +70,11 @@ def identify_track(job_obj) -> str:
             hint_url=hint_url,
         )
 
+        def on_provider(name: str) -> None:
+            engine.heartbeat(job_obj, f"asking {name}: {path.name[:60]}")
+
         try:
-            result = identify(context)
+            result = identify(context, on_provider=on_provider)
         except Exception as exc:
             track.mark_failed(f"identification error: {exc}")
             raise
@@ -111,6 +115,7 @@ def _apply_metadata(track: Track, meta) -> None:
     track.musicbrainz_release_id = (
         meta.musicbrainz_release_id or track.musicbrainz_release_id
     )
+    track.cover_url = (meta.cover_url or track.cover_url)[:1024]
     track.identified_by = meta.provider
     track.confidence = meta.confidence
 

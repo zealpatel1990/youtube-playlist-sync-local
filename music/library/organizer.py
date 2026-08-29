@@ -23,7 +23,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from music import plex
-from music.core import events
+from music.core import artwork, events
 from music.core.fileio import hash_file, is_within, move_file, prune_empty_dirs, unique_path
 from music.core.locks import track_locks
 from music.identify.base import TrackMetadata
@@ -506,16 +506,22 @@ def _bitrate_at(path: Path) -> int:
 
 
 def _write_tags(track: Track, path: Path) -> None:
-    """Write the track's metadata into the file, tolerating a failure.
+    """Write the track's metadata and cover art into the file.
 
     A failed tag write must not abort the move; it is recorded on the row.
     """
+    cover = artwork.fetch(track.cover_url)
     try:
-        tagio.write_tags(path, _metadata_from(track))
+        tagio.write_tags(path, _metadata_from(track), cover=cover)
     except tagio.TagWriteError as exc:
         log.warning("could not tag %s: %s", path, exc)
         track.plan_note = f"moved, but tagging failed: {exc}"[:255]
         track.save(update_fields=["plan_note", "updated_at"])
+        return
+
+    if cover and not track.cover_embedded:
+        track.cover_embedded = True
+        track.save(update_fields=["cover_embedded", "updated_at"])
 
 
 def _metadata_from(track: Track) -> TrackMetadata:

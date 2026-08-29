@@ -147,6 +147,7 @@ DUPLICATE_POLICY = env_str(
 AUTO_ORGANIZE = env_bool("AUTO_ORGANIZE", default=False)
 
 
+
 # --------------------------------------------------------------------------
 # YouTube ingestion
 # --------------------------------------------------------------------------
@@ -157,12 +158,21 @@ PIP_PATH = env_str("PIP_PATH", default="pip")
 FFMPEG_LOCATION = env_str("FFMPEG_LOCATION", default="")
 AUDIO_QUALITY = env_str("AUDIO_QUALITY", default="192")
 
-#: "native" (default) keeps YouTube's own stream — usually Opus — and never
-#: re-encodes: far faster on a Pi, and better audio than a second lossy pass.
-#: "mp3" re-encodes at AUDIO_QUALITY; pick it only for a player that cannot
-#: read Opus (Plex can).
+#: "mp3" (default) re-encodes at AUDIO_QUALITY. "native" remuxes YouTube's own
+#: Opus stream into Ogg without re-encoding — measured on ARMv7: 8s versus 77s
+#: per track, and 4MB versus 6MB.
+#:
+#: mp3 is still the default, because the cost that matters is not the download.
+#: Plex Web transcodes Opus rather than direct-playing it (it cannot detect
+#: browser support, so it converts to be safe), which puts a transcode on EVERY
+#: playback — on hardware that takes 77s to encode one track. MP3 direct-plays
+#: everywhere, including Plexamp, phones and car stereos, and matches the
+#: existing library.
+#:
+#: Choose "native" if you only ever play through Plexamp or Chromecast, which
+#: do direct-play Opus, and want downloads ten times faster.
 AUDIO_FORMAT = env_str(
-    "AUDIO_FORMAT", default="native", choices=("native", "mp3")
+    "AUDIO_FORMAT", default="mp3", choices=("native", "mp3")
 )
 
 #: DASH audio arrives as many small fragments; a few at once fills the pipe on
@@ -177,8 +187,14 @@ DOWNLOAD_CONCURRENT_FRAGMENTS = env_int(
 # --------------------------------------------------------------------------
 
 #: Order matters — cheapest first. Unknown names are rejected at startup.
+#: `tags` is deliberately NOT first here. It is free and would be the right
+#: opener for a well-kept library, but ffmpeg copies YouTube's own metadata into
+#: every download, so a fresh file already carries tags like "Full Video: Hookah
+#: Bar | Khiladi 786 | Akshay Kumar" — enough for the tags tier to "identify" it
+#: and short-circuit the chain before fingerprinting ever runs. Putting acoustid
+#: first means real recognition decides, and tags only fill the gaps it leaves.
 IDENTIFY_CHAIN = env_list(
-    "IDENTIFY_CHAIN", default=["tags", "acoustid", "shazam", "gemini"]
+    "IDENTIFY_CHAIN", default=["acoustid", "shazam", "gemini", "tags"]
 )
 
 ACOUSTID_API_KEY = env_str("ACOUSTID_API_KEY", default="")

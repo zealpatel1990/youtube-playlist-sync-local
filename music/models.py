@@ -72,6 +72,11 @@ class Track(models.Model):
     musicbrainz_recording_id = models.CharField(max_length=64, blank=True)
     musicbrainz_release_id = models.CharField(max_length=64, blank=True)
 
+    #: Where the identifying provider said the artwork lives. Fetched and
+    #: embedded at organize time, not here.
+    cover_url = models.URLField(max_length=1024, blank=True)
+    cover_embedded = models.BooleanField(default=False)
+
     # --- provenance -----------------------------------------------------
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.LIBRARY, db_index=True

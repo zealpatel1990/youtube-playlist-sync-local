@@ -52,8 +52,8 @@ def organize_track(job_obj) -> str:
 def plan_all(job_obj) -> str:
     from music.library import organizer
 
-    def heartbeat() -> None:
-        engine.heartbeat(job_obj)
+    def heartbeat(status: str = "") -> None:
+        engine.heartbeat(job_obj, status)
 
     stats = organizer.plan_all(heartbeat=heartbeat)
     return (
@@ -68,8 +68,8 @@ def plan_all(job_obj) -> str:
 def apply_all(job_obj) -> str:
     from music.library import organizer
 
-    def heartbeat() -> None:
-        engine.heartbeat(job_obj)
+    def heartbeat(status: str = "") -> None:
+        engine.heartbeat(job_obj, status)
 
     stats = organizer.apply_all(heartbeat=heartbeat)
     return (

@@ -81,8 +81,12 @@ def download(job_obj) -> str:
         staging = Path(settings.DOWNLOAD_STAGING)
         staging.mkdir(parents=True, exist_ok=True)
 
-        def heartbeat() -> None:
-            engine.heartbeat(job_obj)
+        def heartbeat(status: str = "") -> None:
+            engine.heartbeat(job_obj, status)
+
+        # yt-dlp's first progress event can be tens of seconds away while it
+        # resolves formats, so say what we are doing before handing over.
+        engine.heartbeat(job_obj, f"starting: {video.title[:70]}")
 
         try:
             path = youtube.download_audio(video, staging, heartbeat=heartbeat)

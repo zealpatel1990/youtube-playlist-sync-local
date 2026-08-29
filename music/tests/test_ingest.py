@@ -339,19 +339,27 @@ class DownloadTests(TestCase):
         self.assertNotIn("ffmpeg_location", opts)
         self.assertEqual(holder["ydl"].extract_calls, [(self.video.url, True)])
 
-    def test_native_format_runs_no_postprocessor(self):
-        """The default must not transcode.
+    @override_settings(AUDIO_FORMAT="native")
+    def test_native_format_remuxes_without_re_encoding(self):
+        """Native must remux, never transcode.
 
-        Re-encoding to MP3 is the most expensive step on a Pi — libmp3lame is
-        effectively single-threaded, and on a 900MHz core a four-minute track
-        can take longer to encode than to fetch. It is also a second lossy pass
-        over YouTube's already-lossy Opus.
+        Two requirements at once. Re-encoding to MP3 is the most expensive step
+        on a Pi and a second lossy pass over YouTube's Opus. But yt-dlp's raw
+        output is WebM, which mutagen cannot tag at all — no title, no artist,
+        no cover art. Remuxing to Ogg copies the stream into a container that
+        carries tags.
         """
         info = self._info_for("vid_public0.mp3")
         patcher, holder = patch_ydl(info)
         with patcher:
             youtube.download_audio(self.video, self.dest)
-        self.assertEqual(holder["ydl"].opts["postprocessors"], [])
+
+        post = holder["ydl"].opts["postprocessors"]
+        self.assertEqual(len(post), 1)
+        self.assertEqual(post[0]["key"], "FFmpegVideoRemuxer")
+        self.assertEqual(post[0]["preferedformat"], "opus")
+        keys = [p["key"] for p in post]
+        self.assertNotIn("FFmpegExtractAudio", keys)
 
     @override_settings(AUDIO_FORMAT="mp3", AUDIO_QUALITY="192")
     def test_mp3_format_adds_the_extract_audio_postprocessor(self):
