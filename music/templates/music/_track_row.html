@@ -84,9 +84,21 @@ the field heading, which is why every cell carries one.
 
     <td class="text-end cell-actions">
         <div class="d-inline-flex gap-1">
-            <button type="button" class="btn btn-sm btn-outline-primary btn-icon"
+            {% comment %}
+            Tap runs the whole chain. Long-press (touch), right-click, or the
+            keyboard menu key opens the provider menu — all three arrive as
+            `contextmenu` except the long-press, which `app.js` synthesises.
+            The data attributes are what the one shared menu binds to, so the
+            menu markup is not repeated for every row.
+            {% endcomment %}
+            <button type="button" class="btn btn-sm btn-outline-primary btn-icon js-identify"
                     hx-post="{% url 'action_identify_track' track.id %}" hx-swap="none"
-                    title="Identify this track" aria-label="Identify this track">
+                    data-track-id="{{ track.id }}"
+                    data-track-label="{% if track.title %}{{ track.title }}{% else %}{{ track.path|basename }}{% endif %}"
+                    data-identify-url="{% url 'action_identify_track' track.id %}"
+                    title="Identify this track — long-press or right-click to pick one provider"
+                    aria-label="Identify this track. Long-press or right-click to choose a single provider."
+                    aria-haspopup="menu">
                 <i class="bi bi-search"></i>
             </button>
 

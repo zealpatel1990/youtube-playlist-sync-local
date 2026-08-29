@@ -200,17 +200,46 @@ FALLBACK_TIERS: tuple[tuple[str, str], ...] = (
 )
 
 
+def available_names() -> list[str]:
+    """The providers that can actually run right now, in chain order.
+
+    What the UI offers when someone asks for one provider by name — a menu
+    listing a provider whose key is missing would only produce a job that
+    reports "not available".
+    """
+    return [provider.name for provider in get_chain()]
+
+
 def identify(
     ctx: IdentifyContext,
     *,
     on_provider: Callable[[str], None] | None = None,
+    only: str = "",
 ) -> TrackMetadata | None:
     """Run the chain and return the first result that clears the bar, or None.
 
     `on_provider` is called with each provider's name before it runs, so a
     caller can report which tier a slow identification is currently in.
+
+    `only` restricts the run to the single named provider — what the UI sends
+    when someone picks one by hand. The guards below still run, but with one
+    provider there is no "rest of the chain" to defer to, so a demoted answer
+    falls through to `FALLBACK_TIERS` and is returned with its warning. That is
+    the point: asking for Shazam should give you Shazam's answer, flagged, not
+    silence.
     """
     threshold = settings.IDENTIFY_MIN_CONFIDENCE
+
+    chain = get_chain()
+    if only:
+        chain = [provider for provider in chain if provider.name == only]
+        if not chain:
+            log.warning(
+                "identify: %r was requested for %s but is not an available "
+                "provider (available: %s)",
+                only, ctx.path.name, ", ".join(available_names()) or "none",
+            )
+            return None
 
     #: Answers a guard objected to, kept by tier instead of thrown away.
     #:
@@ -225,7 +254,7 @@ def identify(
     #: actively mis-files a track, so it is the true last resort.
     fallbacks: dict[str, TrackMetadata] = {}
 
-    for provider in get_chain():
+    for provider in chain:
         if on_provider is not None:
             try:
                 on_provider(provider.name)

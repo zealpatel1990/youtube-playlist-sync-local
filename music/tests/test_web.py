@@ -24,6 +24,7 @@ import tempfile
 import threading
 import types
 from pathlib import Path
+from unittest import mock
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -423,6 +424,50 @@ class ActionTests(TestCase):
     def test_unknown_ids_are_404(self):
         self.assertEqual(self._post("action_identify_track", 99999).status_code, 404)
         self.assertEqual(self._post("action_download_video", "nope").status_code, 404)
+
+    def test_identify_with_one_named_provider(self):
+        """The row menu asks for a single provider; it reaches the job payload."""
+        # Patch the package attribute, not `base`: the view calls
+        # `identify_module.available_names()`, and `music/identify/__init__.py`
+        # bound that name at import time.
+        from music import identify as identify_pkg
+
+        with mock.patch.object(identify_pkg, "available_names",
+                               return_value=["shazam", "gemini"]):
+            response = self.client.post(
+                reverse("action_identify_track", args=[self.track.pk]),
+                {"provider": "shazam"},
+            )
+        self.assertEqual(response.status_code, 204)
+        job = Job.objects.get(kind="identify.track")
+        self.assertEqual(job.payload["provider"], "shazam")
+        self.assertEqual(job.payload["track_id"], self.track.pk)
+        # A distinct key, or asking for one provider could be handed a queued
+        # whole-chain job and the toast would name a provider that never ran.
+        self.assertEqual(job.dedup_key, f"identify.track:{self.track.pk}:shazam")
+
+    def test_identify_rejects_a_provider_that_cannot_run(self):
+        """Never queue a job to ask a provider with no key or no binary."""
+        # Patch the package attribute, not `base`: the view calls
+        # `identify_module.available_names()`, and `music/identify/__init__.py`
+        # bound that name at import time.
+        from music import identify as identify_pkg
+
+        with mock.patch.object(identify_pkg, "available_names",
+                               return_value=["shazam"]):
+            response = self.client.post(
+                reverse("action_identify_track", args=[self.track.pk]),
+                {"provider": "acoustid"},
+            )
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Job.objects.filter(kind="identify.track").exists())
+
+    def test_identify_without_a_provider_still_runs_the_chain(self):
+        response = self._post("action_identify_track", self.track.pk)
+        self.assertEqual(response.status_code, 204)
+        job = Job.objects.get(kind="identify.track")
+        self.assertNotIn("provider", job.payload)
+        self.assertEqual(job.dedup_key, f"identify.track:{self.track.pk}")
 
     def test_repeated_action_reuses_the_active_job(self):
         """Dedup lives in the engine; the view must not create a second row."""

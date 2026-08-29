@@ -70,11 +70,18 @@ def identify_track(job_obj) -> str:
             hint_url=hint_url,
         )
 
+        # Set when someone picked one provider by hand from the row menu. The
+        # view validates it against the running chain, so an unknown name never
+        # reaches here — but `identify()` re-checks and returns None rather than
+        # silently falling back to the whole chain, which would answer a
+        # question nobody asked.
+        only = str(job_obj.payload.get("provider") or "")
+
         def on_provider(name: str) -> None:
             engine.heartbeat(job_obj, f"asking {name}: {path.name[:60]}")
 
         try:
-            result = identify(context, on_provider=on_provider)
+            result = identify(context, on_provider=on_provider, only=only)
         except Exception as exc:
             track.mark_failed(f"identification error: {exc}")
             raise

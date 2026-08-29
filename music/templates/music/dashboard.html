@@ -96,4 +96,31 @@ something actually changes, and nothing at all in between.
     {% include "music/_tracks.html" %}
 </div>
 
+{% comment %}
+One provider menu for the page, moved to whichever row opened it. It lives
+outside #tracks-panel on purpose: that panel is replaced wholesale on every SSE
+update, and a menu inside it would vanish mid-choice.
+
+`providers` is the chain that can actually run, so a provider whose key is
+missing is never offered — and the view rejects it even if it were.
+{% endcomment %}
+<div id="provider-menu" class="card shadow provider-menu" role="menu" hidden
+     aria-label="Identify using one provider">
+    <div class="provider-menu-head text-body-secondary" id="provider-menu-label"></div>
+    {% for provider in providers %}
+    <button type="button" class="provider-menu-item" role="menuitem"
+            data-provider="{{ provider }}">
+        <i class="bi bi-fingerprint"></i> {{ provider }}
+    </button>
+    {% empty %}
+    <div class="provider-menu-empty text-body-secondary">
+        No provider is available — check API keys in Settings.
+    </div>
+    {% endfor %}
+    <button type="button" class="provider-menu-item provider-menu-all" role="menuitem"
+            data-provider="">
+        <i class="bi bi-list-nested"></i> whole chain
+    </button>
+</div>
+
 {% endblock %}

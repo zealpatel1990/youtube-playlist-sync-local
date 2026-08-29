@@ -40,6 +40,7 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from music import identify as identify_module
 from music.core import envfile, events
 from music.jobs import engine
 from music.models import Job, JobState, Track, TrackState, YoutubeVideo
@@ -403,7 +404,16 @@ def dashboard(request):
     return render(
         request,
         "music/dashboard.html",
-        {"nav": "library", **_tracks_page(request), **_stats(), **_jobs()},
+        {
+            "nav": "library",
+            # One menu is rendered for the whole page and moved to whichever
+            # row asked for it. Rendering it per row would repeat this list
+            # fifty times for a feature used once in a while.
+            "providers": identify_module.available_names(),
+            **_tracks_page(request),
+            **_stats(),
+            **_jobs(),
+        },
     )
 
 
@@ -817,7 +827,32 @@ def action_apply(request):
 
 @require_POST
 def action_identify_track(request, pk: int):
+    """Identify one track, optionally through a single named provider.
+
+    `provider` arrives from the row menu (long-press or right-click). It is
+    checked against the *running* chain rather than a hardcoded list: a name
+    that is configured but unusable — no API key, missing binary — is not
+    offered and is not accepted, so the job can never be queued to ask a
+    provider that cannot answer.
+    """
     track = _track_or_404(pk)
+    provider = (request.POST.get("provider") or "").strip()
+
+    if provider and provider not in identify_module.available_names():
+        return _notify(f"{provider} is not an available provider.", "warning")
+
+    if provider:
+        return _queued(
+            "identify.track",
+            f"Identifying with {provider}: {track['label']}",
+            {"track_id": track["id"], "provider": provider},
+            # Distinct from the whole-chain key, so asking for one provider is
+            # never handed a queued full-chain job — the toast would name the
+            # provider while the chain ran instead.
+            dedup_key=f"identify.track:{track['id']}:{provider}",
+            priority=3,
+        )
+
     return _queued(
         "identify.track",
         f"Identifying: {track['label']}",

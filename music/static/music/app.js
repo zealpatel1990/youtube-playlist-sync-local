@@ -120,4 +120,136 @@
         clearTimeout(dropTimer);
         dropTimer = setTimeout(function () { setLive(false); }, 4000);
     });
+
+    // ------------------------------------------------- pick one provider
+    //
+    // Tapping Identify runs the whole chain. Holding it — or right-clicking,
+    // or pressing the keyboard menu key — opens a menu to run exactly one.
+    //
+    // Three openers rather than one because a long-press alone would be
+    // unreachable with a mouse and invisible to a keyboard. Right-click and the
+    // menu key both arrive as `contextmenu`, so that single handler covers
+    // both; touch gets the timer below.
+    //
+    // The menu is delegated from document: #tracks-panel is replaced wholesale
+    // on every SSE update, so a listener bound to a button would die with it.
+
+    var LONG_PRESS_MS = 450;
+    var menu = document.getElementById('provider-menu');
+    var menuLabel = document.getElementById('provider-menu-label');
+    var openFor = null;          // the button the menu currently belongs to
+    var pressTimer = null;
+    var pressButton = null;
+    var suppressClick = false;   // a long-press must not also fire the tap
+
+    function closeMenu() {
+        if (!menu) { return; }
+        menu.hidden = true;
+        if (openFor) { openFor.setAttribute('aria-expanded', 'false'); }
+        openFor = null;
+    }
+
+    function openMenu(button, x, y) {
+        if (!menu || !button) { return; }
+        openFor = button;
+        button.setAttribute('aria-expanded', 'true');
+        menuLabel.textContent = button.getAttribute('data-track-label') || 'this track';
+        menu.hidden = false;
+
+        // Placed after unhiding so the measured size is the real one, and
+        // clamped so a row near the right or bottom edge still shows it whole.
+        var box = menu.getBoundingClientRect();
+        var left = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
+        var top = y;
+        if (top + box.height > window.innerHeight - 8) {
+            top = Math.max(8, y - box.height);
+        }
+        menu.style.left = (left + window.scrollX) + 'px';
+        menu.style.top = (top + window.scrollY) + 'px';
+
+        var first = menu.querySelector('.provider-menu-item');
+        if (first) { first.focus(); }
+    }
+
+    function identifyButton(target) {
+        return target && target.closest ? target.closest('.js-identify') : null;
+    }
+
+    document.addEventListener('contextmenu', function (event) {
+        var button = identifyButton(event.target);
+        if (!button) { return; }
+        event.preventDefault();
+        openMenu(button, event.clientX, event.clientY);
+    });
+
+    document.addEventListener('pointerdown', function (event) {
+        var button = identifyButton(event.target);
+        if (!button) {
+            if (menu && !menu.hidden && !event.target.closest('#provider-menu')) {
+                closeMenu();
+            }
+            return;
+        }
+        if (event.pointerType === 'mouse') { return; }  // mouse uses right-click
+        pressButton = button;
+        clearTimeout(pressTimer);
+        pressTimer = setTimeout(function () {
+            pressTimer = null;
+            suppressClick = true;
+            var box = button.getBoundingClientRect();
+            openMenu(button, box.left, box.bottom + 4);
+        }, LONG_PRESS_MS);
+    });
+
+    function cancelPress() {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+        pressButton = null;
+    }
+    document.addEventListener('pointerup', cancelPress);
+    document.addEventListener('pointercancel', cancelPress);
+    document.addEventListener('pointermove', function (event) {
+        // A scroll that began on the button is not a long-press.
+        if (pressButton && event.pointerType !== 'mouse') { cancelPress(); }
+    });
+    window.addEventListener('scroll', closeMenu, { passive: true });
+    window.addEventListener('resize', closeMenu);
+
+    // The click that follows a long-press would otherwise run the whole chain
+    // as well as opening the menu. Captured so it never reaches htmx.
+    document.addEventListener('click', function (event) {
+        if (suppressClick && identifyButton(event.target)) {
+            event.preventDefault();
+            event.stopPropagation();
+            suppressClick = false;
+        }
+    }, true);
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && menu && !menu.hidden) {
+            var button = openFor;
+            closeMenu();
+            if (button) { button.focus(); }
+        }
+    });
+
+    if (menu) {
+        menu.addEventListener('click', function (event) {
+            var item = event.target.closest('.provider-menu-item');
+            if (!item || !openFor) { return; }
+            var url = openFor.getAttribute('data-identify-url');
+            var provider = item.getAttribute('data-provider') || '';
+            var button = openFor;
+            closeMenu();
+            // `source: document.body` is what carries the CSRF token: the
+            // header lives in body's hx-headers, and an element outside the
+            // htmx tree would post without it and get a 403.
+            window.htmx.ajax('POST', url, {
+                source: document.body,
+                swap: 'none',
+                values: provider ? { provider: provider } : {}
+            });
+            button.focus();
+        });
+    }
 })();
