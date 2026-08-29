@@ -28,10 +28,13 @@ WorkingDirectory=/home/pi/Desktop/py_music_manager
 # unit until the start limit halts it permanently. The previous version of this
 # file was missing it (docs/CODE-AUDIT.md A1) and could not boot from a clean
 # checkout.
+#
+# This is the ONLY place the service gets its environment. There are
+# deliberately no Environment= lines: everything, PATH and PYTHONUNBUFFERED
+# included, lives in .env, so there is exactly one file to audit for secrets and
+# exactly one to edit. v1 kept GEMINI_API_KEY and PLAYLIST_URL inline here, in a
+# file mode 644 reads to every local user.
 EnvironmentFile=/home/pi/Desktop/py_music_manager/.env
-
-Environment="PATH=/home/pi/Desktop/py_music_manager/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="PYTHONUNBUFFERED=1"
 
 # --workers 1 is REQUIRED, not a preference. The job queue's wakeup event, the
 # SSE revision counter and the per-track locks are all in-process; a second

@@ -93,7 +93,7 @@ the field heading, which is why every cell carries one.
             {% if track.needs_move %}
             <button type="button" class="btn btn-sm btn-outline-success btn-icon"
                     hx-post="{% url 'action_organize_track' track.id %}" hx-swap="none"
-                    hx-confirm="Move this file to its planned location?&#10;&#10;{{ track.path|basename }}{% if track.title %}&#10;{{ track.artist|default:'Unknown artist' }} — {{ track.title }}{% endif %}"
+                    hx-confirm="Move this file?{% if track.title %}&#10;&#10;{{ track.artist|default:'Unknown artist' }} — {{ track.title }}{% endif %}&#10;&#10;FROM:&#10;{{ track.path }}&#10;&#10;TO:&#10;{{ track.planned_path }}"
                     title="Move to the planned location" aria-label="Move to the planned location">
                 <i class="bi bi-box-arrow-in-right"></i>
             </button>
@@ -102,7 +102,7 @@ the field heading, which is why every cell carries one.
             {% if track.previous_path %}
             <button type="button" class="btn btn-sm btn-outline-warning btn-icon"
                     hx-post="{% url 'action_revert_track' track.id %}" hx-swap="none"
-                    hx-confirm="Move this file back to where it was before the last organize?&#10;&#10;{{ track.path|basename }}{% if track.title %}&#10;{{ track.artist|default:'Unknown artist' }} — {{ track.title }}{% endif %}"
+                    hx-confirm="Move this file back to where it was before the last organize?{% if track.title %}&#10;&#10;{{ track.artist|default:'Unknown artist' }} — {{ track.title }}{% endif %}&#10;&#10;FROM:&#10;{{ track.path }}&#10;&#10;BACK TO:&#10;{{ track.previous_path }}"
                     title="Undo the last move" aria-label="Undo the last move">
                 <i class="bi bi-arrow-counterclockwise"></i>
             </button>

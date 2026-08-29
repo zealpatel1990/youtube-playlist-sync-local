@@ -161,6 +161,80 @@
     /* An empty-state row must not be squeezed into the label layout. */
     .track-table td.cell-empty { display: block; text-align: center; }
     .track-table td.cell-empty::before { content: none; }
+
+    /* Length and Added are short values that wasted a full row each. Sharing
+       one wrapped line saves roughly a fifth of the card's height, which is a
+       whole extra track per screen. State keeps its own row: it carries the
+       provider and the "move planned" note underneath it. */
+    .track-table td[data-label="Length"],
+    .track-table td[data-label="Added"] {
+        display: inline-flex;
+        width: auto;
+        justify-content: flex-start;
+        text-align: left;
+        gap: .3rem;
+        margin-right: 1.1rem;
+    }
+
+    /* A phone has no hover, so a truncated path is simply unreadable — the
+       title attribute that serves a mouse can never be opened by a thumb.
+       Wrap it instead, bounded so a deep path cannot push the actions away. */
+    .track-table .path-text {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+
+    /* 30px is a mouse target. Thumbs need ~44px, and these two sit next to each
+       other — a mis-tap on Revert moves a file back. */
+    .track-table .btn-icon {
+        width: 44px;
+        height: 44px;
+        font-size: 1.05rem;
+    }
+    .track-table td.cell-actions .d-inline-flex { gap: .5rem !important; }
+}
+
+/* --- the filter bar on a phone ------------------------------------------
+   A btn-group is inline-flex and never wraps: six state pills ran past the
+   right edge of the card and the last one was unreachable. These override
+   Bootstrap's own compound selectors (`.btn-group > .btn:not(:first-child)`),
+   which is why they are !important — an equal-specificity rule would depend on
+   stylesheet order, and app.css is not guaranteed to load after every future
+   vendor bundle. */
+
+@media (max-width: 767.98px) {
+    .state-filter {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .35rem;
+        width: 100%;
+    }
+    .state-filter > .btn {
+        border-radius: var(--bs-border-radius) !important;
+        margin-left: 0 !important;
+        flex: 1 1 auto;
+    }
+
+    /* The remaining controls each take a full-width row rather than being
+       squeezed three-abreast into an unreadable strip. */
+    .filter-bar .dropdown { flex: 1 1 10rem; }
+    .filter-bar .dropdown > .btn { width: 100%; }
+
+    /* Search is the primary control on a phone; give it the whole width
+       instead of the 16rem minimum that overflowed a 320px screen. */
+    .library-search { width: 100%; }
+    .library-search .input-group { min-width: 0 !important; }
+
+    /* Toolbar buttons: full-width thumb targets, two per row. */
+    .toolbar .btn { flex: 1 1 8.5rem; }
+    .toolbar .vr { display: none !important; }
+    .toolbar .ms-auto { margin-left: 0 !important; width: 100%; }
+    .toolbar .ms-auto .btn { width: 100%; }
 }
 
 /* Job detail modal: payload, result and traceback blocks.

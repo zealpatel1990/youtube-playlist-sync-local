@@ -28,6 +28,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
@@ -36,6 +37,7 @@ from django.db import connections
 from django.db.models import Count, F, Q
 from django.http import Http404, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, render
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from music.core import envfile, events
@@ -93,6 +95,8 @@ SORT_CHOICES: dict[str, tuple[str, ...]] = {
     "-state": ("-state", "-updated_at"),
     "duration": ("duration", "id"),
     "-duration": ("-duration", "-id"),
+    "updated": ("-updated_at", "-id"),
+    "-updated": ("updated_at", "id"),
 }
 DEFAULT_SORT = "added"
 
@@ -105,6 +109,85 @@ SORT_COLUMNS = (
     ("duration", "Length"),
     ("added", "Added"),
 )
+
+#: The sort dropdown. Every key is a `SORT_CHOICES` key, so the whitelist still
+#: decides what reaches `order_by()`; this only decides what is offered.
+SORT_OPTIONS = (
+    ("added", "Newest first"),
+    ("-added", "Oldest first"),
+    ("updated", "Recently changed"),
+    ("title", "Title A–Z"),
+    ("artist", "Artist A–Z"),
+    ("album", "Album A–Z"),
+    ("state", "State"),
+)
+
+#: Filter pills. Like sort, a **whitelist**: the key appears in the URL and
+#: `_filter_state` maps it to a predicate, so a user string never reaches
+#: `filter()`. Two entries are synthetic rather than a bare state match —
+#: "unidentified" spans the two pre-identification states, and "planned" is a
+#: column comparison — because those are the questions actually asked of this
+#: table ("what still needs work", "what is waiting for me to apply it").
+TRACK_STATE_FILTERS: tuple[tuple[str, str], ...] = (
+    ("", "All"),
+    ("unidentified", "Needs identifying"),
+    (TrackState.IDENTIFIED, "Identified"),
+    ("planned", "Planned"),
+    (TrackState.ORGANIZED, "Organized"),
+    (TrackState.FAILED, "Failed"),
+    (TrackState.MISSING, "Missing"),
+)
+
+#: Which timestamp `?since=` applies to. "Updated" is the default because the
+#: question after a long run is "what changed", not "what was imported".
+TRACK_DATE_FIELDS: dict[str, tuple[str, str]] = {
+    "updated": ("Updated", "updated_at"),
+    "added": ("Added", "created_at"),
+}
+DEFAULT_DATE_FIELD = "updated"
+
+#: Relative windows, so a bookmarked URL keeps meaning something tomorrow.
+TRACK_SINCE_CHOICES: dict[str, tuple[str, timedelta]] = {
+    "1h": ("Last hour", timedelta(hours=1)),
+    "24h": ("Last 24 hours", timedelta(days=1)),
+    "7d": ("Last 7 days", timedelta(days=7)),
+    "30d": ("Last 30 days", timedelta(days=30)),
+}
+
+#: Not `settings.IDENTIFY_CHAIN`: a track keeps the provider that named it even
+#: after that provider leaves the chain, and filtering it out would hide rows.
+IDENTIFY_PROVIDERS = ("acoustid", "shazam", "gemini", "tags")
+
+
+def _filter_state(queryset, state: str):
+    """Apply one whitelisted state filter. Unknown values filter nothing."""
+    if state == "unidentified":
+        return queryset.filter(
+            state__in=(TrackState.DISCOVERED, TrackState.IDENTIFYING)
+        )
+    if state == "planned":
+        # A plan worth applying: set, and actually different from where the file
+        # already is — `plan_track` stores `path` itself for "already in place".
+        return queryset.exclude(planned_path="").exclude(planned_path=F("path"))
+    if state in TrackState.values:
+        return queryset.filter(state=state)
+    return queryset
+
+
+def _track_state_filters(current: str) -> list[dict]:
+    """The filter pills. Deliberately **countless, and query-free**.
+
+    An earlier version carried a count per pill from one conditional aggregate.
+    It was still a third query on a fragment refetched on every SSE update, and
+    `test_track_fragment_does_not_query_per_row` rightly caught it. The counts
+    already exist one panel up: `_compute_stats()` computes them, memoizes them
+    against the revision counter, and `_stats.html` now links each badge into
+    the matching filter. Numbers in one place, filters in the other.
+    """
+    return [
+        {"value": value, "label": label, "active": current == value}
+        for value, label in TRACK_STATE_FILTERS
+    ]
 
 
 def _paginate(queryset, request):
@@ -142,19 +225,50 @@ def _sort_columns(sort: str) -> list[dict]:
 
 
 def _tracks_page(request) -> dict:
-    """Search / sort / paginate. Shared by the full page and the fragment."""
+    """Search / filter / sort / paginate. Shared by the full page and the fragment.
+
+    Every parameter is validated against a whitelist and silently falls back to
+    its default: these URLs arrive from bookmarks and stale htmx fragments as
+    often as from a person, and a 400 would be a worse answer than page one.
+    """
     query = (request.GET.get("q") or "").strip()[:200]
     sort = request.GET.get("sort") or DEFAULT_SORT
     if sort not in SORT_CHOICES:
         sort = DEFAULT_SORT
 
+    state = request.GET.get("state") or ""
+    if state not in {value for value, _ in TRACK_STATE_FILTERS}:
+        state = ""
+
+    on = request.GET.get("on") or DEFAULT_DATE_FIELD
+    if on not in TRACK_DATE_FIELDS:
+        on = DEFAULT_DATE_FIELD
+
+    since = request.GET.get("since") or ""
+    if since not in TRACK_SINCE_CHOICES:
+        since = ""
+
+    by = request.GET.get("by") or ""
+    if by not in IDENTIFY_PROVIDERS:
+        by = ""
+
     queryset = Track.objects.only(*TRACK_LIST_FIELDS)
     if query:
+        # `path` is in here because an unidentified track has no title, artist
+        # or album to match — the filename is the only handle it has.
         queryset = queryset.filter(
             Q(title__icontains=query)
             | Q(artist__icontains=query)
             | Q(album__icontains=query)
+            | Q(path__icontains=query)
         )
+    queryset = _filter_state(queryset, state)
+    if by:
+        queryset = queryset.filter(identified_by=by)
+    if since:
+        cutoff = timezone.now() - TRACK_SINCE_CHOICES[since][1]
+        queryset = queryset.filter(**{f"{TRACK_DATE_FIELDS[on][1]}__gte": cutoff})
+
     queryset = queryset.order_by(*SORT_CHOICES[sort])
     page = _paginate(queryset, request)
 
@@ -165,6 +279,31 @@ def _tracks_page(request) -> dict:
         "q": query,
         "sort": sort,
         "sort_columns": _sort_columns(sort),
+        "sort_options": [
+            {"value": value, "label": label, "active": sort == value}
+            for value, label in SORT_OPTIONS
+        ],
+        "state": state,
+        "state_filters": _track_state_filters(state),
+        "on": on,
+        "since": since,
+        "by": by,
+        "date_fields": [
+            {"value": key, "label": label, "active": on == key}
+            for key, (label, _) in TRACK_DATE_FIELDS.items()
+        ],
+        "since_choices": [
+            {"value": key, "label": label, "active": since == key}
+            for key, (label, _) in TRACK_SINCE_CHOICES.items()
+        ],
+        "provider_choices": [
+            {"value": name, "label": name, "active": by == name}
+            for name in IDENTIFY_PROVIDERS
+        ],
+        #: Drives the "Clear filters" control and the empty-state wording. `on`
+        #: is excluded: it selects which date a window applies to and means
+        #: nothing on its own.
+        "filters_active": bool(query or state or since or by),
     }
 
 

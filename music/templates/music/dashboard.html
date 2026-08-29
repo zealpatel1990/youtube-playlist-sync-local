@@ -20,13 +20,21 @@ something actually changes, and nothing at all in between.
         </span>
     </div>
 
-    <form method="get" action="{% url 'dashboard' %}" class="d-flex gap-2" role="search">
-        {# Sort survives a search; page does not, or you land on an empty page. #}
+    <form method="get" action="{% url 'dashboard' %}" class="d-flex gap-2 library-search" role="search">
+        {% comment %}
+        Sort and every filter survive a search; page does not, or you land on an
+        empty page. A GET form submits only its own fields, so anything not
+        repeated here would be silently dropped the moment someone types.
+        {% endcomment %}
         <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="state" value="{{ state }}">
+        <input type="hidden" name="since" value="{{ since }}">
+        <input type="hidden" name="on" value="{{ on }}">
+        <input type="hidden" name="by" value="{{ by }}">
         <div class="input-group input-group-sm" style="min-width: 16rem;">
             <span class="input-group-text"><i class="bi bi-search"></i></span>
             <input type="search" class="form-control" name="q" value="{{ q }}"
-                   placeholder="Title, artist or album" aria-label="Search the library">
+                   placeholder="Title, artist, album or filename" aria-label="Search the library">
             <button class="btn btn-outline-secondary" type="submit">Search</button>
         </div>
     </form>
@@ -39,7 +47,8 @@ something actually changes, and nothing at all in between.
 </div>
 
 <div class="card mb-3">
-    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center">
+    {# `toolbar` lets app.css give these full-width thumb targets under 768px. #}
+    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center toolbar">
         <span class="small text-body-secondary me-1 d-none d-md-inline">Actions</span>
 
         <button type="button" class="btn btn-sm btn-outline-primary"

@@ -8,6 +8,105 @@ works when this is rendered into the dashboard and when it is fetched directly.
 {% endcomment %}
 {% load music_extras %}
 
+{% comment %}
+Filter bar. Every control is a plain link built with `{% querystring %}`, which
+carries the other parameters forward — so state, window, provider, search and
+sort compose instead of clobbering each other. No JS, and each combination is a
+real URL you can bookmark or send to yourself.
+
+`page=None` on every one of them: narrowing the set while sitting on page 7
+would otherwise land you on an empty page.
+{% endcomment %}
+<div class="card mb-3 filter-bar">
+    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center">
+        {% comment %}
+        `state-filter` is what makes this reachable on a phone. A Bootstrap
+        btn-group is inline-flex and never wraps, so six pills overflowed the
+        card and the last one — "Failed", the one you most want on a phone —
+        was clipped off-screen with no way to scroll to it. Under 768px
+        `app.css` turns this into wrapping pills.
+        {% endcomment %}
+        <div class="btn-group btn-group-sm state-filter" role="group" aria-label="Filter by state">
+            {% for pill in state_filters %}
+            <a class="btn {% if pill.active %}btn-primary{% else %}btn-outline-secondary{% endif %}"
+               href="{% querystring state=pill.value page=None %}"
+               {% if pill.active %}aria-current="true"{% endif %}>
+                {{ pill.label }}
+            </a>
+            {% endfor %}
+        </div>
+
+        <div class="vr d-none d-lg-block"></div>
+
+        {# Window, plus which timestamp it applies to. #}
+        <div class="dropdown">
+            <button class="btn btn-sm {% if since %}btn-primary{% else %}btn-outline-secondary{% endif %} dropdown-toggle"
+                    type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-clock-history"></i>
+                {% if since %}{% for c in since_choices %}{% if c.active %}{{ c.label }}{% endif %}{% endfor %}
+                {% else %}Any time{% endif %}
+            </button>
+            <ul class="dropdown-menu">
+                <li><h6 class="dropdown-header">Changed within</h6></li>
+                <li><a class="dropdown-item {% if not since %}active{% endif %}"
+                       href="{% querystring since=None page=None %}">Any time</a></li>
+                {% for choice in since_choices %}
+                <li><a class="dropdown-item {% if choice.active %}active{% endif %}"
+                       href="{% querystring since=choice.value page=None %}">{{ choice.label }}</a></li>
+                {% endfor %}
+                <li><hr class="dropdown-divider"></li>
+                <li><h6 class="dropdown-header">Measured on</h6></li>
+                {% for field in date_fields %}
+                <li><a class="dropdown-item {% if field.active %}active{% endif %}"
+                       href="{% querystring on=field.value page=None %}">{{ field.label }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        {# Which provider named it — the "what actually worked" question. #}
+        <div class="dropdown">
+            <button class="btn btn-sm {% if by %}btn-primary{% else %}btn-outline-secondary{% endif %} dropdown-toggle"
+                    type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-fingerprint"></i>
+                {% if by %}{{ by }}{% else %}Any provider{% endif %}
+            </button>
+            <ul class="dropdown-menu">
+                <li><a class="dropdown-item {% if not by %}active{% endif %}"
+                       href="{% querystring by=None page=None %}">Any provider</a></li>
+                {% for choice in provider_choices %}
+                <li><a class="dropdown-item {% if choice.active %}active{% endif %}"
+                       href="{% querystring by=choice.value page=None %}">{{ choice.label }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="dropdown">
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle"
+                    type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-sort-down"></i>
+                {% for option in sort_options %}{% if option.active %}{{ option.label }}{% endif %}{% endfor %}
+            </button>
+            <ul class="dropdown-menu">
+                {% for option in sort_options %}
+                <li><a class="dropdown-item {% if option.active %}active{% endif %}"
+                       href="{% querystring sort=option.value page=None %}">{{ option.label }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <span class="small text-body-secondary ms-auto">
+            {{ page_obj.paginator.count }} match{{ page_obj.paginator.count|pluralize:"es" }}
+        </span>
+
+        {% if filters_active %}
+        <a class="btn btn-sm btn-link text-decoration-none"
+           href="{% querystring q=None state=None since=None by=None page=None %}">
+            <i class="bi bi-x-circle"></i> Clear
+        </a>
+        {% endif %}
+    </div>
+</div>
+
 <div class="card">
     <div class="table-responsive">
         <table class="table table-hover align-middle mb-0 track-table">
@@ -37,9 +136,9 @@ works when this is rendered into the dashboard and when it is fetched directly.
                 {% empty %}
                 <tr>
                     <td colspan="5" class="text-center text-body-secondary py-5 cell-empty">
-                        {% if q %}
-                            No track matches <strong>{{ q }}</strong>.
-                            <a href="{% querystring q=None page=None %}">Clear the search</a>.
+                        {% if filters_active %}
+                            No track matches these filters{% if q %} and <strong>{{ q }}</strong>{% endif %}.
+                            <a href="{% querystring q=None state=None since=None by=None page=None %}">Clear them</a>.
                         {% else %}
                             <i class="bi bi-inbox fs-4 d-block mb-2"></i>
                             Nothing in the library yet — run <strong>Scan disks</strong>

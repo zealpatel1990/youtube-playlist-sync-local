@@ -86,7 +86,7 @@ root out of both, so what is left on screen is exactly the part that changes.
                             clicked, which is exactly what you want to check
                             before moving a file.
                             {% endcomment %}
-                            hx-confirm="Move this file now?&#10;&#10;{{ move.track.path|basename }}{% if move.track.title %}&#10;{{ move.track.artist|default:'Unknown artist' }} — {{ move.track.title }}{% endif %}"
+                            hx-confirm="Move this file now?{% if move.track.title %}&#10;&#10;{{ move.track.artist|default:'Unknown artist' }} — {{ move.track.title }}{% endif %}&#10;&#10;FROM:&#10;{{ move.track.path }}&#10;&#10;TO:&#10;{{ move.track.planned_path }}"
                             title="Move this file now" aria-label="Move this file now">
                         <i class="bi bi-box-arrow-in-right"></i>
                     </button>
