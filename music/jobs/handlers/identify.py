@@ -80,6 +80,23 @@ def identify_track(job_obj) -> str:
             raise
 
         if result is None:
+            # Nothing recognised the audio, so fall back to what the upload
+            # calls itself. This is a display name only: the dashboard shows it
+            # instead of a bare video id, and the track stays FAILED so the
+            # retry sweep keeps trying as catalogues grow.
+            #
+            # Deliberately no artist. That is what keeps a guess out of the
+            # library — `plan_track` refuses anything without
+            # `has_core_metadata` (title AND artist), so this can never be
+            # filed under "Unknown Artist", and `TagsProvider` ignores a
+            # title-only file, so a later pass cannot read this back and
+            # mistake our own guess for an identification.
+            #
+            # Only when empty, so a re-identification that fails never
+            # overwrites the name a provider gave earlier.
+            if hint_title and not track.title:
+                track.title = hint_title[:512]
+                track.save(update_fields=["title", "updated_at"])
             track.mark_failed("no provider could identify this track")
             return f"unidentified: {track.path}"
 
