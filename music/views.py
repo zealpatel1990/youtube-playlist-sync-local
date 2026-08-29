@@ -135,8 +135,20 @@ TRACK_STATE_FILTERS: tuple[tuple[str, str], ...] = (
     (TrackState.IDENTIFIED, "Identified"),
     ("planned", "Planned"),
     (TrackState.ORGANIZED, "Organized"),
+    (TrackState.SKIPPED, "Skipped"),
     (TrackState.FAILED, "Failed"),
     (TrackState.MISSING, "Missing"),
+)
+
+#: Everything `?state=` accepts — the pill values **plus every real state**.
+#:
+#: The pills are a curated subset, but `_stats.html` renders a badge linking to
+#: `?state=<value>` for *every* `TrackState`, so a validator limited to the pills
+#: made those links silently fall back to "All": clicking "Skipped: 6" showed all
+#: 559 rows. A filter that ignores itself is worse than no link, so the accepted
+#: set is derived from the model rather than from the pill list.
+VALID_STATE_FILTERS = frozenset(
+    {value for value, _ in TRACK_STATE_FILTERS} | set(TrackState.values)
 )
 
 #: Which timestamp `?since=` applies to. "Updated" is the default because the
@@ -238,7 +250,7 @@ def _tracks_page(request) -> dict:
         sort = DEFAULT_SORT
 
     state = request.GET.get("state") or ""
-    if state not in {value for value, _ in TRACK_STATE_FILTERS}:
+    if state not in VALID_STATE_FILTERS:
         state = ""
 
     on = request.GET.get("on") or DEFAULT_DATE_FIELD

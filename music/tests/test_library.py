@@ -739,6 +739,80 @@ class DuplicatePolicyTests(LibraryTestCase):
 
 
 class FindDuplicatesTests(LibraryTestCase):
+    def test_mistagged_files_of_different_lengths_are_not_duplicates(self):
+        """Three different songs carrying one song's tags are not three copies.
+
+        From a real library: a previous tool wrote the same title, album and
+        track number into three unrelated Coke Studio recordings, so all three
+        grouped — and `plan_track` computed the same destination for all three,
+        which under `keep-best` would have parked two real songs in
+        `.duplicates/`. Length is the one claim a mis-tagger cannot fake.
+        """
+        for name, duration in (
+            ("senraan.mp3", 386),   # 6:26
+            ("laadki.mp3", 588),    # 9:48
+            ("rangabati.mp3", 417),  # 6:57
+        ):
+            self.make_track(
+                self.incoming / name,
+                title="Senraan Ra Baairya",
+                artist="Asif Hussain Samraat & Zoe Viccaji",
+                album_artist="Various Artists",
+                album="Coke Studio Sessions (Season 4)",
+                track_no=7,
+                duration=duration,
+            )
+
+        self.assertEqual(organizer.find_duplicates(), [])
+
+    def test_two_rips_of_the_same_track_still_group(self):
+        """The guard must not cost the case duplicates exist for."""
+        first = self.make_track(
+            self.incoming / "128.mp3", title="Song", album="Album", track_no=3,
+            duration=386, bitrate=128,
+        )
+        second = self.make_track(
+            self.incoming / "320.mp3", title="Song", album="Album", track_no=3,
+            duration=388, bitrate=320,
+        )
+
+        groups = organizer.find_duplicates()
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual({t.pk for t in groups[0]}, {first.pk, second.pk})
+
+    def test_unknown_duration_never_blocks_a_group(self):
+        """0 is unknown, never a mismatch — rows scanned before duration existed."""
+        first = self.make_track(
+            self.incoming / "x.mp3", title="Song", album="Album", track_no=3,
+            duration=0,
+        )
+        second = self.make_track(
+            self.incoming / "y.mp3", title="Song", album="Album", track_no=3,
+            duration=386,
+        )
+
+        groups = organizer.find_duplicates()
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual({t.pk for t in groups[0]}, {first.pk, second.pk})
+
+    def test_identical_bytes_group_regardless_of_length(self):
+        """The hash pass is not length-checked: same bytes is same file, full stop."""
+        first = self.make_track(
+            self.incoming / "p.mp3", title="P", track_no=1,
+            content_hash="abc123", duration=386,
+        )
+        second = self.make_track(
+            self.incoming / "q.mp3", title="Q", track_no=2,
+            content_hash="abc123", duration=999,
+        )
+
+        groups = organizer.find_duplicates()
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual({t.pk for t in groups[0]}, {first.pk, second.pk})
+
     def test_groups_by_content_hash(self):
         # Distinct metadata on purpose, so only the hash can group these.
         first = self.make_track(

@@ -355,6 +355,9 @@ def find_duplicates() -> list[list[Track]]:
                 track_no=key["track_no"],
                 title=key["title"],
             ),
+            # Tags are user data, and the metadata pass trusts them entirely.
+            # Bytes need no corroboration, so only this pass is length-checked.
+            check_duration=True,
         )
 
     if groups:
@@ -362,12 +365,53 @@ def find_duplicates() -> list[list[Track]]:
     return groups
 
 
-def _add_group(groups: list[list[Track]], seen: set[frozenset[int]], queryset) -> None:
+#: How far two lengths may differ and still be the same recording. Generous:
+#: one rip may carry a second of padding or a fade the other does not.
+DURATION_TOLERANCE_SECONDS = 20
+
+
+def _same_length(members: list[Track]) -> list[Track]:
+    """Drop members whose length rules them out as the same recording.
+
+    The metadata grouping believes whatever the files claim, so three tracks
+    mis-tagged with one song's title, album and track number are reported as
+    three copies of it. Observed on a real library: "Senraan Ra Baairya"
+    (6:26), "Laadki" (9:48) and "Rangabati" (6:57) — three different songs,
+    grouped because a previous tool had written the same tags into all three.
+
+    That is worse than a wrong page: `plan_track` builds the destination from
+    those same four fields, so all three computed one path, and under
+    `keep-best` two real songs would have been parked in `.duplicates/`.
+
+    A length is the one claim a mis-tagger cannot fake — it comes from the
+    audio. 0 means unknown and never counts as a mismatch, so nothing that
+    grouped before duration was recorded starts being dropped now.
+    """
+    anchor = next((track.duration for track in members if track.duration > 0), 0)
+    if not anchor:
+        return members
+    return [
+        track
+        for track in members
+        if track.duration == 0
+        or abs(track.duration - anchor) <= DURATION_TOLERANCE_SECONDS
+    ]
+
+
+def _add_group(
+    groups: list[list[Track]],
+    seen: set[frozenset[int]],
+    queryset,
+    *,
+    check_duration: bool = False,
+) -> None:
     members = list(
         queryset.exclude(state=TrackState.MISSING).order_by("-bitrate", "id")[
             :MAX_GROUP_MEMBERS
         ]
     )
+    if check_duration:
+        members = _same_length(members)
     if len(members) < 2:
         return
     key = frozenset(track.pk for track in members)

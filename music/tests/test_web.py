@@ -132,6 +132,51 @@ class DashboardTests(TestCase):
                 )
 
 
+class StateFilterTests(TestCase):
+    """`?state=` must honour every state the stats panel links to.
+
+    `_stats.html` renders a badge per `TrackState` linking to `?state=<value>`,
+    while the filter pills show a curated subset. When the validator accepted
+    only the pill values, the badges for the states without one — SKIPPED,
+    DISCOVERED, IDENTIFYING — silently fell back to "All": clicking
+    "Skipped: 6" returned the whole library.
+    """
+
+    def setUp(self):
+        # One track per state, so a filter returning the wrong set is visible.
+        for index, state in enumerate(TrackState.values):
+            make_track(path=f"/music/s{index}.mp3", title=f"T{index}", state=state)
+
+    def test_every_state_is_accepted_by_the_filter(self):
+        for state in TrackState.values:
+            with self.subTest(state=state):
+                self.assertIn(state, views.VALID_STATE_FILTERS)
+
+    def test_every_state_filters_to_exactly_its_own_track(self):
+        for state in TrackState.values:
+            with self.subTest(state=state):
+                response = self.client.get(reverse("dashboard"), {"state": state})
+                self.assertEqual(response.status_code, 200)
+                tracks = response.context["tracks"]
+                self.assertEqual(
+                    [t.state for t in tracks], [state],
+                    f"?state={state} did not filter to that state alone",
+                )
+
+    def test_skipped_is_offered_as_a_pill(self):
+        response = self.client.get(reverse("dashboard"))
+        values = [pill["value"] for pill in response.context["state_filters"]]
+        self.assertIn(TrackState.SKIPPED, values)
+
+    def test_an_unknown_state_falls_back_to_all_rather_than_erroring(self):
+        response = self.client.get(reverse("dashboard"), {"state": "nonsense"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["state"], "")
+        self.assertEqual(
+            len(response.context["tracks"]), len(TrackState.values)
+        )
+
+
 class FragmentTests(TestCase):
     def setUp(self):
         make_track()
