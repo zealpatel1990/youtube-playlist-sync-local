@@ -27,6 +27,20 @@
 
 /* --- density ------------------------------------------------------------ */
 
+/* Fixed layout, so the widths below are obeyed rather than treated as hints.
+   Under the default `auto`, the file path — which is nowrap so it can ellipsis
+   — sizes the Track column to the longest path on the page and pushes the
+   actions off the right edge. */
+.track-table {
+    table-layout: fixed;
+    width: 100%;
+}
+/* Every column but Track is sized; Track takes what is left. */
+.track-table th.col-state { width: 9.5rem; }
+.track-table th.col-duration { width: 6rem; }
+.track-table th.col-added { width: 8rem; }
+.track-table th.col-actions { width: 7.5rem; }
+
 .track-table th {
     font-size: .72rem;
     letter-spacing: .04em;

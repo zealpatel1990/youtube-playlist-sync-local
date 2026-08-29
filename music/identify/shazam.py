@@ -20,13 +20,35 @@ from pathlib import Path
 
 from django.conf import settings
 
-from music.core.ratelimit import RateLimiter
+from music.core.ratelimit import RATE_LIMIT_WAIT_SECONDS, RateLimiter
 
 from .base import IdentifyContext, Provider, TrackMetadata
 
 log = logging.getLogger("music.identify")
 
-CONFIDENCE = 0.8
+#: Shazam returns no score of its own — a match carries only `offset`,
+#: `timeskew` and `frequencyskew`. The skews are how far the audio had to be
+#: stretched in time and pitch to line up with the reference, so a genuine
+#: same-recording match sits near zero and a forced one does not. Measured on
+#: real files (|timeskew| + |frequencyskew|):
+#:
+#:   0.0001  Chatte Batte          correct
+#:   0.0001  Dilliwaali Girlfriend correct
+#:   0.0022  Hookah Bar            correct
+#:   0.0085  Rinku Bhabhi          WRONG ("Lil Muillet - *Horror Sounds*")
+#:   0.0124  Shape of You (Carnatic cover)  WRONG
+#:
+#: A flat score let those two outrank a correct later provider — Gemini names
+#: the Rinku Bhabhi track properly but never ran, because a constant 0.80 beat
+#: the threshold first.
+CONFIDENCE_CEILING = 0.88
+
+#: Chosen so the correct matches above stay comfortably over
+#: IDENTIFY_MIN_CONFIDENCE (0.5) and both wrong ones fall well under it.
+SKEW_PENALTY = 76.0
+
+#: When a response carries no usable skew, neither reward nor reject it.
+CONFIDENCE_UNKNOWN = 0.6
 
 #: A "Released" string arrives as "1979", "1979-11-30" or "30 November 1979".
 _YEAR = re.compile(r"(1[89]\d{2}|20\d{2})")
@@ -68,7 +90,7 @@ class ShazamProvider(Provider):
         return ""
 
     def identify(self, ctx: IdentifyContext) -> TrackMetadata | None:
-        if not rate_limiter().acquire(timeout=settings.PROVIDER_TIMEOUT_SECONDS):
+        if not rate_limiter().acquire(timeout=RATE_LIMIT_WAIT_SECONDS):
             log.warning("shazam: rate limiter is saturated; skipping %s", ctx.path.name)
             return None
 
@@ -99,8 +121,20 @@ def _recognize(ctx: IdentifyContext, timeout: float) -> dict:
     return asyncio.run(_recognize_async(ctx, timeout))
 
 
-#: Seconds of audio sent to Shazam. Its own app matches from a few seconds.
+#: Seconds of audio sent to Shazam. Its own app matches from a few seconds of
+#: a phone microphone, so more does not help — and sending a whole track costs
+#: decode time and upload for no gain.
 EXCERPT_SECONDS = 15
+
+#: WHERE those seconds come from matters more than how many. The opening of a
+#: track is the worst place to look: intros, silence, spoken introductions and
+#: label idents carry nothing to recognise, which is how a comedy sketch got
+#: matched to "*Horror Sounds*". A third of the way in lands on the actual
+#: music for almost anything.
+EXCERPT_START_FRACTION = 0.33
+
+#: Never seek past this, so a long mix still gets a sensible window.
+EXCERPT_MAX_START_SECONDS = 90.0
 
 
 async def _recognize_async(ctx: IdentifyContext, timeout: float) -> dict:
@@ -111,12 +145,12 @@ async def _recognize_async(ctx: IdentifyContext, timeout: float) -> dict:
     from shazamio import Shazam
 
     shazam = Shazam()
-    with _excerpt(ctx.path) as source:
+    with _excerpt(ctx.path, ctx.duration) as source:
         return await asyncio.wait_for(shazam.recognize(str(source)), timeout=timeout)
 
 
 @contextlib.contextmanager
-def _excerpt(path: Path):
+def _excerpt(path: Path, duration: int = 0):
     """Yield a short mono WAV of `path`, falling back to the file itself.
 
     Not just `shazam.recognize(path)` because shazamio decodes with symphonia,
@@ -139,6 +173,9 @@ def _excerpt(path: Path):
         completed = subprocess.run(
             [
                 ffmpeg, "-hide_banner", "-loglevel", "error",
+                # -ss before -i seeks by keyframe without decoding the skipped
+                # part, so starting later costs nothing.
+                "-ss", f"{_excerpt_start(duration):.1f}",
                 "-t", str(EXCERPT_SECONDS),
                 "-i", str(path),
                 "-ac", "1",
@@ -161,6 +198,13 @@ def _excerpt(path: Path):
         yield path
     finally:
         target.unlink(missing_ok=True)
+
+
+def _excerpt_start(duration: int) -> float:
+    """Where to take the sample from. Never the opening — see the constants."""
+    if duration <= EXCERPT_SECONDS * 2:
+        return 0.0
+    return min(duration * EXCERPT_START_FRACTION, EXCERPT_MAX_START_SECONDS)
 
 
 def _ffmpeg_binary() -> str | None:
@@ -199,11 +243,13 @@ def parse_recognition(response: dict | None) -> TrackMetadata | None:
         # `coverart` is a thumbnail; the HQ variant is usable for Plex.
         cover_url = str(images.get("coverarthq") or images.get("coverart") or "").strip()
 
+    confidence = _confidence_from_skew(response)
+
     # The label is logged but not carried: TrackMetadata has no publisher field
     # and the Plex layout never reads one.
     log.debug(
-        "shazam: matched '%s - %s' (album=%r label=%r year=%s)",
-        artist, title, album, label, year,
+        "shazam: matched '%s - %s' (album=%r label=%r year=%s confidence=%.2f)",
+        artist, title, album, label, year, confidence,
     )
 
     return TrackMetadata(
@@ -217,9 +263,41 @@ def parse_recognition(response: dict | None) -> TrackMetadata | None:
         year=year,
         genre=genre,
         cover_url=cover_url,
-        confidence=CONFIDENCE,
+        confidence=confidence,
         provider=ShazamProvider.name,
     )
+
+
+def _confidence_from_skew(response: dict) -> float:
+    """Derive a confidence from how far the audio had to be bent to match.
+
+    Shazam gives no score, so the skews stand in for one: a real match needs
+    almost no correction, a forced one needs a lot. Calibrated against the
+    measurements listed with the constants above.
+    """
+    matches = (response or {}).get("matches")
+    if not isinstance(matches, list) or not matches:
+        return CONFIDENCE_UNKNOWN
+
+    best = None
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        # Absent skew is unknown, not zero: a match dict carrying neither key
+        # would otherwise score as a flawless one.
+        if "timeskew" not in match and "frequencyskew" not in match:
+            continue
+        try:
+            skew = abs(float(match.get("timeskew") or 0.0)) + abs(
+                float(match.get("frequencyskew") or 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+        best = skew if best is None else min(best, skew)
+
+    if best is None:
+        return CONFIDENCE_UNKNOWN
+    return max(0.0, min(CONFIDENCE_CEILING, CONFIDENCE_CEILING - SKEW_PENALTY * best))
 
 
 def _section_value(track: dict, key: str) -> str:

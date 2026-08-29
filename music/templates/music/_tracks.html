@@ -13,15 +13,22 @@ works when this is rendered into the dashboard and when it is fetched directly.
         <table class="table table-hover align-middle mb-0 track-table">
             <thead>
                 <tr>
+                    {% comment %}
+                    The column class carries the width; `app.css` sizes every
+                    column but Track, which absorbs the remainder. Widths only
+                    hold because the table is `table-layout: fixed` — under the
+                    default `auto` the longest file path sets the column width
+                    and pushes Actions off screen.
+                    {% endcomment %}
                     {% for column in sort_columns %}
-                    <th scope="col" {% if column.key == "title" %}style="width:45%"{% endif %}>
+                    <th scope="col" class="col-{{ column.key }}">
                         <a href="{% querystring sort=column.next page=None %}">
                             {{ column.label }}
                             {% if column.arrow %}<i class="bi {{ column.arrow }}"></i>{% endif %}
                         </a>
                     </th>
                     {% endfor %}
-                    <th scope="col" class="text-end">Actions</th>
+                    <th scope="col" class="text-end col-actions">Actions</th>
                 </tr>
             </thead>
             <tbody>

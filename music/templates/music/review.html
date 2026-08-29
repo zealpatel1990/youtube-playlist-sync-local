@@ -80,7 +80,13 @@ root out of both, so what is left on screen is exactly the part that changes.
                     </span>
                     <button type="button" class="btn btn-sm btn-outline-success btn-icon"
                             hx-post="{% url 'action_organize_track' move.track.id %}" hx-swap="none"
-                            hx-confirm="Move this one file now?"
+                            {% comment %}
+                            Name the track in the prompt: a bare "Move this one
+                            file now?" gives no way to tell which row was
+                            clicked, which is exactly what you want to check
+                            before moving a file.
+                            {% endcomment %}
+                            hx-confirm="Move this file now?&#10;&#10;{{ move.track.path|basename }}{% if move.track.title %}&#10;{{ move.track.artist|default:'Unknown artist' }} — {{ move.track.title }}{% endif %}"
                             title="Move this file now" aria-label="Move this file now">
                         <i class="bi bi-box-arrow-in-right"></i>
                     </button>

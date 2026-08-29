@@ -168,12 +168,53 @@ def _tracks_page(request) -> dict:
     }
 
 
+#: `_stats()` memoized against the revision counter. One bump wakes every open
+#: tab at once and they all refetch the same fragment, so without this the same
+#: two aggregates are computed once per tab for identical numbers. Measured at
+#: 20k tracks: 76ms per call, so four tabs spent 300ms deriving one answer.
+#:
+#: The revision is global — any bump invalidates this — and every path that
+#: changes a track ends in a job completion, which bumps. A stale entry is
+#: therefore not reachable from a change this process made.
+_stats_cache: tuple[int, dict] | None = None
+
+
 def _stats() -> dict:
     """Two grouped queries — never a row dump (A2).
 
     `_stats.html` is refetched on every SSE update, so its cost is the cost of
     *every* change in the system. Keep it aggregate-only.
+
+    The result is cached until the next `events.bump()`. Treat it as read-only:
+    every open tab shares the one dict.
     """
+    global _stats_cache
+
+    revision = events.current()
+    cached = _stats_cache
+    # Read without a lock: the tuple is replaced atomically, so the worst a
+    # racing thread can do is compute the same numbers twice.
+    if revision and cached is not None and cached[0] == revision:
+        return cached[1]
+
+    computed = _compute_stats()
+    if revision:
+        # Never memoize revision 0. `events.reset_for_tests()` rewinds to 0, so
+        # an entry stamped 0 could outlive the reset and answer a later test
+        # with an earlier one's numbers. Production leaves 0 at the first bump.
+        _stats_cache = (revision, computed)
+    return computed
+
+
+def reset_for_tests() -> None:
+    """Drop the memo. `events.reset_for_tests()` rewinds the revision to 0, so a
+    cache entry stamped 0 would otherwise outlive the reset and answer with the
+    previous test's numbers."""
+    global _stats_cache
+    _stats_cache = None
+
+
+def _compute_stats() -> dict:
     counts = {
         row["state"]: row["n"]
         for row in Track.objects.values("state").annotate(n=Count("id"))

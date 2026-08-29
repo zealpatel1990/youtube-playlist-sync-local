@@ -19,8 +19,9 @@ import urllib.request
 
 from django.conf import settings
 
-from music.core.ratelimit import RateLimiter
+from music.core.ratelimit import RATE_LIMIT_WAIT_SECONDS, RateLimiter
 
+from . import matching
 from .base import IdentifyContext, Provider, TrackMetadata
 
 log = logging.getLogger("music.identify")
@@ -42,6 +43,15 @@ LOOKUP_META = "recordings releases tracks compress"
 #: Seconds of audio Chromaprint reads. AcoustID's index is built from the first
 #: two minutes, so more buys no accuracy and costs real ARMv7 CPU.
 FPCALC_LENGTH_SECONDS = 120
+
+#: Fingerprinting gets its own budget rather than PROVIDER_TIMEOUT_SECONDS,
+#: which exists to bound a *network* call. This is bounded CPU work — decoding
+#: at most FPCALC_LENGTH_SECONDS of audio — and how long it takes depends
+#: entirely on how busy the box is. Measured here: 8s on an idle container, but
+#: over 30s with several workers competing, which silently disabled AcoustID on
+#: exactly the tracks a loaded queue was working through. Abandoning it halfway
+#: wastes the decode and drops the one provider that supplies track numbers.
+FPCALC_TIMEOUT_SECONDS = 300
 
 #: A refusal to allocate an unbounded body into 1GB of shared RAM.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -144,13 +154,14 @@ class AcoustidProvider(Provider):
                 command,
                 capture_output=True,
                 text=True,
-                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                timeout=FPCALC_TIMEOUT_SECONDS,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             log.warning(
-                "acoustid: fpcalc timed out after %.0fs on %s",
-                settings.PROVIDER_TIMEOUT_SECONDS, ctx.path,
+                "acoustid: fpcalc timed out after %.0fs on %s — the box is very "
+                "busy; lower WORKER_THREADS if this recurs",
+                FPCALC_TIMEOUT_SECONDS, ctx.path,
             )
             return None
         except (OSError, ValueError) as exc:
@@ -197,7 +208,7 @@ class AcoustidProvider(Provider):
     # --- lookup ---------------------------------------------------------
 
     def _lookup(self, fingerprint: str, duration: int) -> dict | None:
-        if not rate_limiter().acquire(timeout=settings.PROVIDER_TIMEOUT_SECONDS):
+        if not rate_limiter().acquire(timeout=RATE_LIMIT_WAIT_SECONDS):
             log.warning("acoustid: rate limiter is saturated; skipping this lookup")
             return None
 
@@ -281,7 +292,7 @@ def parse_lookup(payload: dict, ctx: IdentifyContext) -> TrackMetadata | None:
     if score <= 0:
         return None
 
-    recording = _pick_recording(best.get("recordings") or [], ctx.duration)
+    recording = _pick_recording(best.get("recordings") or [], ctx.duration, ctx.hint_title)
     if recording is None:
         # A match with no MusicBrainz recording attached: nothing to write.
         log.debug("acoustid: %s matched but carries no recording", ctx.path.name)
@@ -330,11 +341,15 @@ def parse_lookup(payload: dict, ctx: IdentifyContext) -> TrackMetadata | None:
     )
 
 
-def _pick_recording(recordings: list, duration: int) -> dict | None:
-    """The recording whose length best matches the file.
+def _pick_recording(recordings: list, duration: int, hint_title: str = "") -> dict | None:
+    """The recording that best matches the file, by title first and length second.
 
-    One fingerprint routinely matches a studio cut, a radio edit and three live
-    versions; duration is the only signal that tells them apart.
+    One fingerprint routinely matches a studio cut, a radio edit, three live
+    versions and several covers. Duration alone chooses badly among them: a file
+    titled "Billie Eilish - when the party's over" was filed under Poté because
+    that cover's length was one second closer than the alternative. When the
+    file's own title is known it outranks duration, which only ever separated
+    near-identical lengths.
     """
     candidates = [
         r for r in recordings if isinstance(r, dict) and str(r.get("title") or "").strip()
@@ -342,13 +357,20 @@ def _pick_recording(recordings: list, duration: int) -> dict | None:
     if not candidates:
         return None
 
-    def rank(recording: dict) -> tuple[int, int]:
+    def rank(recording: dict) -> tuple[int, int, int]:
+        title = str(recording.get("title") or "")
+        artist, _ = _artist_credit(recording)
         recorded = int(_as_float(recording.get("duration")))
-        if duration > 0 and recorded > 0:
-            delta = abs(recorded - duration)
-        else:
-            delta = _NO_DURATION_MATCH
-        return (delta, 0 if recording.get("releases") else 1)
+        delta = (
+            abs(recorded - duration)
+            if duration > 0 and recorded > 0
+            else _NO_DURATION_MATCH
+        )
+        named = 0 if matching.shares_a_word(artist, hint_title) else 1
+        derivative = 1 if matching.looks_like_a_different_recording(
+            title, artist, hint_title
+        ) else 0
+        return (derivative, named, delta)
 
     return min(candidates, key=rank)
 

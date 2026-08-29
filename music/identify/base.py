@@ -19,6 +19,8 @@ from typing import Callable
 
 from django.conf import settings
 
+from . import matching
+
 log = logging.getLogger("music.identify")
 
 
@@ -217,6 +219,29 @@ def identify(
         if not result.is_usable():
             log.debug(
                 "provider %s returned an unusable result for %s", provider.name, ctx.path
+            )
+            continue
+
+        if matching.looks_like_a_different_recording(
+            result.title, result.artist, ctx.hint_title
+        ):
+            # A cover, karaoke or instrumental of what was asked for. The
+            # fingerprint of a faithful cover is close enough that providers
+            # return one confidently — AcoustID filed a Billie Eilish download
+            # under Poté at 0.97. Passing lets a later provider answer, and one
+            # usually does.
+            log.info(
+                "provider %s answered '%s - %s' for %s, which looks like a "
+                "different recording of it; continuing",
+                provider.name, result.artist, result.title, ctx.path.name,
+            )
+            continue
+
+        if matching.is_unrelated(result.title, result.artist, ctx.hint_title):
+            log.info(
+                "provider %s answered '%s - %s' for %s, which shares nothing with "
+                "its title; continuing",
+                provider.name, result.artist, result.title, ctx.path.name,
             )
             continue
 

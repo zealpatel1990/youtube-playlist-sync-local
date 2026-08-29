@@ -18,7 +18,7 @@ from pathlib import Path
 
 from django.conf import settings
 
-from music.core.ratelimit import DailyBudget, RateLimiter
+from music.core.ratelimit import RATE_LIMIT_WAIT_SECONDS, DailyBudget, RateLimiter
 
 from .base import IdentifyContext, Provider, TrackMetadata
 
@@ -147,7 +147,7 @@ class GeminiProvider(Provider):
             _note_exhausted()
             return None
 
-        if not rate_limiter().acquire(timeout=settings.PROVIDER_TIMEOUT_SECONDS):
+        if not rate_limiter().acquire(timeout=RATE_LIMIT_WAIT_SECONDS):
             log.warning("gemini: rate limiter is saturated; skipping %s", ctx.path.name)
             return None
 

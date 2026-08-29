@@ -20,7 +20,7 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 
 from music.identify import acoustid as acoustid_module
-from music.identify import base, gemini as gemini_module, shazam as shazam_module
+from music.identify import base, gemini as gemini_module, matching, shazam as shazam_module
 from music.identify.acoustid import AcoustidProvider
 from music.identify.base import IdentifyContext, Provider, TrackMetadata
 from music.identify.gemini import GeminiProvider
@@ -552,7 +552,17 @@ class AcoustidProviderTests(SimpleTestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[0], "fpcalc")
         self.assertIn("-length", command)
-        self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+        # Its own budget, not PROVIDER_TIMEOUT_SECONDS: fingerprinting is CPU
+        # work whose duration depends on how loaded the box is, and bounding it
+        # by a network timeout silently disabled AcoustID whenever the queue was
+        # busy — measured at 8s idle and over 30s under load.
+        self.assertEqual(
+            run.call_args.kwargs["timeout"], acoustid_module.FPCALC_TIMEOUT_SECONDS
+        )
+        self.assertGreater(
+            acoustid_module.FPCALC_TIMEOUT_SECONDS, 60,
+            "a fingerprint must survive a loaded queue",
+        )
 
     def test_the_lookup_carries_an_explicit_timeout(self):
         with self._fpcalc(), self._lookup(ACOUSTID_PAYLOAD) as urlopen:
@@ -672,7 +682,9 @@ class ShazamProviderTests(SimpleTestCase):
         self.assertEqual(result.year, 1977)
         self.assertEqual(result.genre, "Rock")
         self.assertEqual(result.cover_url, "https://example.invalid/cover-800.jpg")
-        self.assertEqual(result.confidence, 0.8)
+        # No `matches` in this fixture, so the skew is unknown and the score
+        # falls back rather than being rewarded — see test_confidence_* below.
+        self.assertEqual(result.confidence, shazam_module.CONFIDENCE_UNKNOWN)
         self.assertEqual(result.provider, "shazam")
         # Shazam knows nothing about album artists or track positions.
         self.assertEqual(result.album_artist, "")
@@ -888,3 +900,126 @@ class GeminiProviderTests(SimpleTestCase):
             self.assertEqual(
                 GeminiProvider().identify(make_context(hint_title="x")).year, 0
             )
+
+
+class ShazamConfidenceTests(SimpleTestCase):
+    """Shazam returns no score, so it is derived from how far the audio was bent.
+
+    The numbers here are real measurements, not invented: the two rejected
+    cases are matches this provider actually got wrong on the test library,
+    where a flat 0.80 let them beat a later provider that was right.
+    """
+
+    def _confidence(self, timeskew: float, freqskew: float) -> float:
+        return shazam_module._confidence_from_skew(
+            {"matches": [{"timeskew": timeskew, "frequencyskew": freqskew}]}
+        )
+
+    def test_a_clean_match_scores_high(self):
+        # Chatte Batte and Dilliwaali Girlfriend, both correct.
+        self.assertGreater(self._confidence(0.00010, 0.00000), 0.8)
+        self.assertGreater(self._confidence(0.00003, -0.00004), 0.8)
+
+    def test_a_slightly_skewed_match_still_clears_the_threshold(self):
+        # Hookah Bar: correct, but not a pristine match.
+        self.assertGreater(self._confidence(0.00119, 0.00097), 0.5)
+
+    def test_a_badly_skewed_match_is_rejected(self):
+        # Rinku Bhabhi -> "Lil Muillet - *Horror Sounds*", and the Carnatic
+        # Shape of You -> a generic radio instrumental. Both wrong.
+        self.assertLess(self._confidence(-0.00394, 0.00452), 0.5)
+        self.assertLess(self._confidence(-0.00254, 0.00981), 0.5)
+
+    def test_the_best_match_wins_when_several_are_returned(self):
+        score = shazam_module._confidence_from_skew({
+            "matches": [
+                {"timeskew": 0.009, "frequencyskew": 0.009},
+                {"timeskew": 0.00001, "frequencyskew": 0.00001},
+            ]
+        })
+        self.assertGreater(score, 0.8)
+
+    def test_missing_or_malformed_skew_falls_back(self):
+        for response in ({}, {"matches": []}, {"matches": [{}]},
+                         {"matches": ["nonsense"]}, {"matches": [{"timeskew": "x"}]}):
+            with self.subTest(response=response):
+                self.assertEqual(
+                    shazam_module._confidence_from_skew(response),
+                    shazam_module.CONFIDENCE_UNKNOWN,
+                )
+
+    def test_confidence_never_leaves_zero_to_one(self):
+        self.assertEqual(self._confidence(10.0, 10.0), 0.0)
+        self.assertLessEqual(self._confidence(0.0, 0.0), 1.0)
+
+
+class TitleCrossCheckTests(SimpleTestCase):
+    """The answer is compared against the title we already know.
+
+    Every case here is a real misfiling from the test library.
+    """
+
+    def test_a_cover_is_rejected_when_the_file_is_not_one(self):
+        # AcoustID filed a Billie Eilish download under Poté at 0.97: the
+        # cover's title contains "Billie Eilish Cover", so word overlap
+        # endorses it and only the cover marker separates them.
+        self.assertTrue(matching.looks_like_a_different_recording(
+            "when the party's over (Billie Eilish Cover)", "Poté",
+            "Billie Eilish - when the party's over (Audio)",
+        ))
+
+    def test_a_cover_is_kept_when_the_file_asked_for_one(self):
+        self.assertFalse(matching.looks_like_a_different_recording(
+            "Shape Of You (Radio Instrumental)", "Kar Vogue",
+            "Shape of You - Carnatic Instrumental Cover",
+        ))
+
+    def test_the_real_recording_is_not_rejected(self):
+        self.assertFalse(matching.looks_like_a_different_recording(
+            "when the party's over", "Billie Eilish",
+            "Billie Eilish - when the party's over (Audio)",
+        ))
+
+    def test_an_unrelated_answer_is_rejected(self):
+        # Shazam answered this for a Sunil Grover comedy track.
+        self.assertTrue(matching.is_unrelated(
+            "*Horror Sounds*", "Lil Muillet",
+            "Rinku Bhabhi : Mere Husband Mujhko Piyar Nahin Karte | Sunil Grover",
+        ))
+
+    def test_a_transliterated_title_survives_on_the_artist_alone(self):
+        # "Jai Adhyashakti" and "Jay Aadhya Shakti" share no token at all;
+        # only the credited artist keeps this correct answer alive.
+        self.assertFalse(matching.is_unrelated(
+            "Jay Aadhya Shakti", "Ratansinh Vaghela & Damyanti Barot",
+            "Ambe Maa Aarti | Jai Adhyashakti | Ratansinh Vaghela, Damyanti Barot",
+        ))
+
+    def test_noise_words_alone_do_not_count_as_a_match(self):
+        self.assertTrue(matching.is_unrelated(
+            "Official Video", "Some Artist",
+            "Totally Different Song | Official Video | Full Audio",
+        ))
+
+    def test_nothing_is_rejected_when_there_is_no_hint(self):
+        self.assertFalse(matching.is_unrelated("Anything", "Anyone", ""))
+        self.assertFalse(matching.looks_like_a_different_recording(
+            "Anything (Cover)", "Anyone", ""))
+
+
+class ShazamExcerptWindowTests(SimpleTestCase):
+    """Which seconds get sent matters more than how many."""
+
+    def test_the_sample_skips_the_intro(self):
+        start = shazam_module._excerpt_start(200)
+        self.assertGreater(start, 30, "an intro or spoken opening carries nothing")
+        self.assertLess(start, 100)
+
+    def test_a_short_file_is_taken_from_the_start(self):
+        self.assertEqual(shazam_module._excerpt_start(20), 0.0)
+        self.assertEqual(shazam_module._excerpt_start(0), 0.0)
+
+    def test_a_long_mix_does_not_seek_arbitrarily_far(self):
+        self.assertLessEqual(
+            shazam_module._excerpt_start(3600), shazam_module.EXCERPT_MAX_START_SECONDS
+        )

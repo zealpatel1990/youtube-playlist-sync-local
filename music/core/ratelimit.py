@@ -7,6 +7,15 @@ import time
 from datetime import date
 
 
+#: How long to wait for a rate-limit token. Deliberately not
+#: PROVIDER_TIMEOUT_SECONDS: that bounds a network call, while this is just
+#: queueing behind other workers. With several workers sharing one limiter the
+#: wait routinely exceeds a network timeout, and giving up looks exactly like
+#: the provider having no answer — so the track gets recorded as unidentified
+#: when it was only busy. The job's lease is far longer than this.
+RATE_LIMIT_WAIT_SECONDS = 120.0
+
+
 class RateLimiter:
     """Classic token bucket. Thread-safe, monotonic, no background thread."""
 
