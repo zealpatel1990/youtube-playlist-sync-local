@@ -7,7 +7,12 @@ Wants=network-online.target
 # The library lives on the USB disk. Without this, a boot where the disk has
 # not mounted yet would either fail every download or — worse — silently write
 # into a directory created on the SD card, filling it.
-RequiresMountsFor=/media/pi/500gb hdd
+#
+# The quotes are load-bearing: this directive takes a SPACE-SEPARATED list of
+# paths, so unquoted "500gb hdd" parses as two entries — "/media/pi/500gb" plus
+# a relative "hdd" — and the unit gains a Requires= on a mount unit that does
+# not exist, which fails the start outright.
+RequiresMountsFor="/media/pi/500gb hdd"
 
 StartLimitIntervalSec=100
 StartLimitBurst=5

@@ -198,6 +198,10 @@ def identify(
     caller can report which tier a slow identification is currently in.
     """
     threshold = settings.IDENTIFY_MIN_CONFIDENCE
+    #: An answer good enough to keep but credited to an artist the upload title
+    #: does not mention. Held back in case a later provider agrees with the
+    #: title, and returned unchanged if none does.
+    fallback: TrackMetadata | None = None
 
     for provider in get_chain():
         if on_provider is not None:
@@ -256,12 +260,44 @@ def identify(
         if not result.provider:
             result = replace(result, provider=provider.name)
 
+        if matching.contradicts_hint_artist(result.artist, ctx.hint_title):
+            # Everything above passed and the answer is still probably wrong:
+            # the upload title names one artist and this credits another.
+            # Confidence cannot settle it — AcoustID returned "Sons of Serendip"
+            # for a Billie Eilish download at 0.98, because MusicBrainz has only
+            # covers linked to that fingerprint, so no score or sampling change
+            # reaches the right answer. Ask the rest of the chain and prefer
+            # whoever agrees with the title; keep this as the fallback for when
+            # nobody does, which is the common case for uploads whose title
+            # simply omits the performer.
+            if fallback is None:
+                fallback = result
+                log.info(
+                    "provider %s answered '%s - %s' for %s, but the title names "
+                    "'%s'; asking the rest of the chain",
+                    provider.name, result.artist, result.title, ctx.path.name,
+                    matching.hint_artist(ctx.hint_title),
+                )
+            continue
+
         log.info(
             "identified %s as '%s - %s' via %s (%.2f)",
             ctx.path.name, result.artist, result.title, result.provider,
             result.confidence,
         )
         return result
+
+    if fallback is not None:
+        # Nobody corroborated the title. The first acceptable answer is still
+        # better than none — this is exactly what the old chain would have
+        # returned, so a track can never get worse than before.
+        log.info(
+            "identified %s as '%s - %s' via %s (%.2f) — no provider matched the "
+            "title's artist, keeping the first acceptable answer",
+            ctx.path.name, fallback.artist, fallback.title, fallback.provider,
+            fallback.confidence,
+        )
+        return fallback
 
     log.info("no provider could identify %s", ctx.path)
     return None

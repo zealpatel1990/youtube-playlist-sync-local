@@ -65,6 +65,48 @@ def shares_a_word(text: str, hint_title: str) -> bool:
     return bool(tokens(text) & tokens(hint_title))
 
 
+#: Only a spaced dash separates an artist from a title. "Ziddi-Piddi" and
+#: "Bluff-Master" are single words; " - " is the convention uploaders use.
+_ARTIST_SPLIT = re.compile(r"\s[-–—]\s")
+
+
+def hint_artist(hint_title: str) -> str:
+    """The artist half of an "Artist - Title" upload, or "" if it has no such shape.
+
+    Only the left side of a spaced dash counts, and only when it looks like a
+    name rather than the first half of a song title. Everything else returns ""
+    so callers treat the hint as carrying no artist claim at all.
+    """
+    if not hint_title:
+        return ""
+    parts = _ARTIST_SPLIT.split(hint_title, 1)
+    if len(parts) != 2:
+        return ""
+    left = parts[0].strip()
+    # A trailing colon means the left side is a context, not a performer:
+    # "Pushpa: Saami Saami - Lyrical" names a film and a song, no artist.
+    if ":" in left:
+        return ""
+    return left if tokens(left) else ""
+
+
+def contradicts_hint_artist(result_artist: str, hint_title: str) -> bool:
+    """True when the title names an artist and the answer credits a different one.
+
+    The case this exists for: a Billie Eilish download that AcoustID answered
+    with "Sons of Serendip" at 0.98. Nothing else catches it — the title matches,
+    the answer carries no cover marker, and the score is as high as scores get.
+    The only thing wrong is the name on it, and the upload title says so.
+
+    False whenever there is no artist to contradict, so a file titled
+    "Ek School Banana Hai" is never demoted for naming nobody.
+    """
+    artist = hint_artist(hint_title)
+    if not artist or not result_artist:
+        return False
+    return not bool(tokens(result_artist) & tokens(artist))
+
+
 def is_unrelated(result_title: str, result_artist: str, hint_title: str) -> bool:
     """True when the answer has nothing in common with the title we know.
 
