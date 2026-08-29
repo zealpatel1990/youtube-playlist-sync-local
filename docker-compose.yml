@@ -29,8 +29,8 @@ services:
     # The Pi's disks, mapped onto the sandbox in _devdata/ (gitignored).
     # Same shape as the real box: two scan roots feeding one library.
     volumes:
-      - ./_devdata/music:/media/music                   # <- /media/pi/500gb hdd/Music
-      - ./_devdata/youtube_music:/media/youtube_music   # <- /media/pi/500gb hdd/Youtube_Music
+      - ./_devdata/music:/media/music                   # <- /media/pi/MUSIC/Music
+      - ./_devdata/youtube_music:/media/youtube_music   # <- /media/pi/MUSIC/Youtube_Music
       - ./_devdata/library:/media/library               # <- LIBRARY_ROOT
       - ./_devdata/staging:/media/staging               # <- DOWNLOAD_STAGING
       - ./_devdata/db:/data                             # <- the SQLite file

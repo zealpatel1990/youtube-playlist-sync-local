@@ -36,16 +36,29 @@ Multi-disc albums prepend the disc number to the track number, so disc 3 track 2
 
 ## How tracks get identified
 
-Cheapest source first, so the expensive and rate-limited ones only see what the cheap ones could not resolve:
+Each source is asked in turn, and the first answer that survives the checks below wins:
 
 | Order | Source | Notes |
 |---|---|---|
-| 1 | Existing tags | Free. Most of a well-kept library stops here. |
-| 2 | **AcoustID** | Free API key. Fingerprints audio with `fpcalc`, resolves via MusicBrainz. Does the bulk of the work, and is the only source that returns track and disc numbers — which the Plex layout needs. |
-| 3 | Shazam | For rips, remixes and YouTube-only audio that AcoustID cannot match. |
-| 4 | Gemini | Last resort, inference from the title. Rate-limited *and* capped by a hard daily budget, because the free tier's quota is small. |
+| 1 | **AcoustID** | Free API key. Fingerprints the audio with `fpcalc`, resolves via MusicBrainz. The only source that returns **track and disc numbers**, which the Plex layout is built from — which is why it goes first even though it matches less often than Shazam. |
+| 2 | Shazam | Matches far more of a non-Western catalogue, but returns no track number. |
+| 3 | Gemini | Reads the *title*, not the audio, so it names things no fingerprint can — regional, devotional and older recordings that are in neither commercial index. Rate-limited *and* capped by a hard daily budget, because the free tier's quota is small. |
+| 4 | Existing tags | Last, not first: a file's own tags are believed only when nothing else could identify it, so a mis-tagged file is not simply rubber-stamped. |
 
 Each provider can be switched off. The chain is `IDENTIFY_CHAIN` in `.env`.
+
+**An answer has to agree with the file.** A result is rejected — and the next
+source asked — when it looks like a cover of the track rather than the track,
+when it shares no word with the upload's title, or when the title names one
+artist and the answer credits another. That last check exists because a
+fingerprint match can be confidently wrong: a Billie Eilish download came back
+as a Sons of Serendip cover at 0.98, because that is the only recording
+MusicBrainz has linked to those fingerprints. If every source is rejected, the
+best of them is kept anyway and flagged for review — an answer they all agreed
+on beats no answer at all.
+
+**To force one source**, long-press (or right-click) a track's Identify button
+and pick it. Useful when you can see the chain has settled on the wrong answer.
 
 ## Why it stays quiet on a Pi
 
@@ -155,8 +168,8 @@ python scripts/devdata.py reset --yes     # wipe it and start over
 
 | Sandbox | Stands in for |
 |---|---|
-| `_devdata/music/` | `/media/pi/500gb hdd/Music` |
-| `_devdata/youtube_music/` | `/media/pi/500gb hdd/Youtube_Music` |
+| `_devdata/music/` | `/media/pi/MUSIC/Music` |
+| `_devdata/youtube_music/` | `/media/pi/MUSIC/Youtube_Music` |
 | `_devdata/library/` | `LIBRARY_ROOT` |
 | `_devdata/staging/` | `DOWNLOAD_STAGING` |
 

@@ -735,8 +735,12 @@ class EnvFileTests(TestCase):
         self.assertIn("# note", text)
 
     def test_a_value_containing_a_hash_survives_a_round_trip(self):
-        """The old writer split at ' #' and silently truncated the value."""
-        value = "/media/pi/500gb hdd/Music # main"
+        """The old writer split at ' #' and silently truncated the value.
+
+        The value carries a space as well as a hash: both are legal in an
+        unquoted .env path and both broke the previous writer.
+        """
+        value = "/media/pi/My Music/Library # main"
         envfile.set_values({"LIBRARY_ROOT": value}, self.path)
         self.assertEqual(envfile.read_values(self.path)["LIBRARY_ROOT"], value)
 

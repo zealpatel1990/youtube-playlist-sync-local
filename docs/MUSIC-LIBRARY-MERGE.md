@@ -3,8 +3,8 @@
 **Goal:** merge the two MP3 collections on the Pi's USB HDD into one library organized to Plex conventions, with correct embedded tags, identified by audio fingerprinting.
 
 **Sources** (both on the same HDD, so moves stay within one filesystem):
-- `/media/pi/500gb hdd/Music` — the existing collection
-- `/media/pi/500gb hdd/Youtube_Music` — yt-dlp output, including this app's **live** sync directory `Youtube_Music/playlist_sync_django` (`OUTPUT_DIRECTORY` in `.env`)
+- `/media/pi/MUSIC/Music` — the existing collection
+- `/media/pi/MUSIC/Youtube_Music` — yt-dlp output, including this app's **live** sync directory `Youtube_Music/playlist_sync_django` (`OUTPUT_DIRECTORY` in `.env`)
 
 ## Target layout
 
@@ -59,7 +59,7 @@ Two of the four open questions were settled by building this into the app rather
 
 Two remain configurable rather than decided, because they are yours to choose per run:
 
-- **Merged root** is `LIBRARY_ROOT` in `.env`. Pointing it at `/media/pi/500gb hdd/Music` absorbs everything in place; pointing it at a fresh `Plex_Music/` builds the new tree while leaving both sources untouched until you have verified it. The fresh root is safer and costs disk headroom — worth it for the first run.
+- **Merged root** is `LIBRARY_ROOT` in `.env`. Pointing it at `/media/pi/MUSIC/Music` absorbs everything in place; pointing it at a fresh `Plex_Music/` builds the new tree while leaving both sources untouched until you have verified it. The fresh root is safer and costs disk headroom — worth it for the first run.
 - **Duplicate policy** is `DUPLICATE_POLICY`, defaulting to `report-only` (find them, change nothing). `keep-best` keeps the highest bitrate and moves the rest to `LIBRARY_ROOT/.duplicates/`; `keep-both` disambiguates with a suffix. Nothing is ever deleted under any policy.
 
 ## English metadata for a non-English library

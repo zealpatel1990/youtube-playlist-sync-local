@@ -5,8 +5,8 @@ Manage the local test sandbox in _devdata/.
 The sandbox mirrors the Pi's layout, so the only difference between testing here
 and running there is the paths:
 
-    _devdata/music/          <- /media/pi/500gb hdd/Music          (scan root)
-    _devdata/youtube_music/  <- /media/pi/500gb hdd/Youtube_Music  (scan root)
+    _devdata/music/          <- /media/pi/MUSIC/Music          (scan root)
+    _devdata/youtube_music/  <- /media/pi/MUSIC/Youtube_Music  (scan root)
     _devdata/library/        <- LIBRARY_ROOT
     _devdata/staging/        <- DOWNLOAD_STAGING
     _devdata/db/             <- the container's SQLite file

@@ -8,11 +8,12 @@ Wants=network-online.target
 # not mounted yet would either fail every download or — worse — silently write
 # into a directory created on the SD card, filling it.
 #
-# The quotes are load-bearing: this directive takes a SPACE-SEPARATED list of
-# paths, so unquoted "500gb hdd" parses as two entries — "/media/pi/500gb" plus
-# a relative "hdd" — and the unit gains a Requires= on a mount unit that does
-# not exist, which fails the start outright.
-RequiresMountsFor="/media/pi/500gb hdd"
+# Keep the quotes. This directive takes a SPACE-SEPARATED list of paths, so a
+# mount whose name contains a space — "/media/pi/My Music", the shape Raspberry
+# Pi OS gives a disk labelled that way — parses unquoted as two entries, and the
+# unit gains a Requires= on a mount unit that does not exist, which fails the
+# start outright. Quoted, one path with a space is still one path.
+RequiresMountsFor="/media/pi/MUSIC"
 
 StartLimitIntervalSec=100
 StartLimitBurst=5
@@ -21,7 +22,7 @@ StartLimitBurst=5
 Type=simple
 User=pi
 Group=pi
-WorkingDirectory=/home/pi/Desktop/py_music_manager
+WorkingDirectory=/home/pi/music-manager
 
 # THIS LINE IS LOAD-BEARING. Settings read configuration from the environment,
 # so without it gunicorn fails during app import and systemd crash-loops the
@@ -34,7 +35,7 @@ WorkingDirectory=/home/pi/Desktop/py_music_manager
 # included, lives in .env, so there is exactly one file to audit for secrets and
 # exactly one to edit. v1 kept GEMINI_API_KEY and PLAYLIST_URL inline here, in a
 # file mode 644 reads to every local user.
-EnvironmentFile=/home/pi/Desktop/py_music_manager/.env
+EnvironmentFile=/home/pi/music-manager/.env
 
 # --workers 1 is REQUIRED, not a preference. The job queue's wakeup event, the
 # SSE revision counter and the per-track locks are all in-process; a second
@@ -46,7 +47,7 @@ EnvironmentFile=/home/pi/Desktop/py_music_manager/.env
 # variable and issue no queries); running out of them is not (A2).
 #
 # Never add --preload: worker threads do not survive gunicorn's fork.
-ExecStart=/home/pi/Desktop/py_music_manager/.venv/bin/gunicorn \
+ExecStart=/home/pi/music-manager/.venv/bin/gunicorn \
     --workers 1 \
     --threads 16 \
     --worker-class gthread \

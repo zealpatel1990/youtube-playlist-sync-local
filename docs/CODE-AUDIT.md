@@ -34,7 +34,7 @@ Under gunicorn the worker fails during app import, the arbiter exits with "Worke
 
 **The live Pi must therefore be running a hand-edited unit that is not in this repo** — worth recovering and committing, since the repo currently cannot reproduce the running deployment.
 
-**Fix:** add `EnvironmentFile=/home/pi/Desktop/py_music_manager/.env` to `[Service]` and delete the placeholder. For belt-and-braces, mirror `manage.py` in `wsgi.py` with `load_dotenv(BASE_DIR / ".env")` before `get_wsgi_application()`.
+**Fix:** add `EnvironmentFile=/home/pi/music-manager/.env` to `[Service]` and delete the placeholder. For belt-and-braces, mirror `manage.py` in `wsgi.py` with `load_dotenv(BASE_DIR / ".env")` before `get_wsgi_application()`.
 
 ## A2 — SSE pins a thread per tab and full-scans both tables per tick · CONFIRMED · High
 
