@@ -226,6 +226,15 @@ def _iter_audio_files(root: Path) -> Iterator[tuple[str, os.stat_result]]:
                         if os.path.splitext(name)[1].lower() not in extensions:
                             continue
                         stat = entry.stat()
+                        # A zero-byte file holds no audio by definition. It is
+                        # what a download killed at the first byte leaves, and
+                        # what `fileio.move_file` leaves if the process dies in
+                        # the instant between reserving a destination name and
+                        # writing to it. Importing one creates a Track that can
+                        # never be identified and never goes away.
+                        if stat.st_size == 0:
+                            log.debug("skipping empty file %s", entry.path)
+                            continue
                     except OSError as exc:
                         log.warning("skipping %s: %s", entry.path, exc)
                         continue

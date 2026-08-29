@@ -556,6 +556,48 @@ class MoveFileTests(TempDirTestCase):
         self.assertEqual(result, target)
         self.assertTrue(target.is_file())
 
+    def test_concurrent_moves_to_one_destination_lose_nothing(self):
+        """Two workers organizing tracks that compute the same path.
+
+        `unique_path` checked `exists()` and the caller then called
+        `os.replace`, which overwrites without complaint — so both threads
+        picked the same free name and one file was destroyed silently. Measured
+        before the fix: 12 moves in, 8 files out. The destination name is now
+        reserved with O_CREAT|O_EXCL, which tests and creates in one syscall.
+        """
+        import threading
+
+        count = 12
+        sources = [self._source(f"src{i}.mp3", f"payload-{i}".encode())
+                   for i in range(count)]
+        destination = self.tmp / "collide" / "same.mp3"
+        barrier = threading.Barrier(count)
+        failures: list[BaseException] = []
+
+        def move(source):
+            barrier.wait()
+            try:
+                move_file(source, destination)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        threads = [threading.Thread(target=move, args=(s,)) for s in sources]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(failures, [])
+        landed = sorted(p for p in (self.tmp / "collide").iterdir() if p.is_file())
+        self.assertEqual(len(landed), count, "a concurrent move overwrote another")
+        # Every payload survived exactly once: nothing was silently replaced.
+        self.assertEqual(
+            sorted(p.read_bytes() for p in landed),
+            sorted(f"payload-{i}".encode() for i in range(count)),
+        )
+        for source in sources:
+            self.assertFalse(source.exists())
+
     def test_does_not_clobber_an_existing_target(self):
         source = self._source(payload=b"new")
         target = self.tmp / "taken.mp3"

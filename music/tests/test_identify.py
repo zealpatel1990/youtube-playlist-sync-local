@@ -1007,6 +1007,121 @@ class TitleCrossCheckTests(SimpleTestCase):
             "Anything (Cover)", "Anyone", ""))
 
 
+class PlaceholderHintTests(SimpleTestCase):
+    """A dead video's title is not a title.
+
+    Observed on the real library: a file whose playlist entry had decayed to
+    "[Deleted video]" was answered "DrINsaNE - JUST A BOY" by AcoustID, Shazam,
+    Gemini *and* its own embedded tags, and every one was discarded for sharing
+    no word with the placeholder. "[Deleted video]" tokenises to {"deleted"} —
+    "video" is noise — which overlaps nothing, so the guard fired exactly as
+    written on an input that carries no information.
+    """
+
+    def test_placeholders_are_not_usable_hints(self):
+        for placeholder in ("[Private video]", "[Deleted video]", "[private video]"):
+            with self.subTest(placeholder=placeholder):
+                self.assertEqual(matching.usable_hint(placeholder), "")
+
+    def test_a_real_title_survives_unchanged(self):
+        self.assertEqual(
+            matching.usable_hint("  Kabira | Yeh Jawaani Hai Deewani  "),
+            "Kabira | Yeh Jawaani Hai Deewani",
+        )
+
+    def test_a_correct_answer_is_not_unrelated_to_a_placeholder(self):
+        self.assertFalse(matching.is_unrelated(
+            "Just a Boy", "DrINsaNE", "[Deleted video]"))
+        self.assertFalse(matching.is_unrelated(
+            "Zara Zara", "Bombay Jayashri", "[Private video]"))
+
+    def test_a_placeholder_names_no_artist_to_contradict(self):
+        self.assertFalse(
+            matching.contradicts_hint_artist("DrINsaNE", "[Deleted video]")
+        )
+
+    def test_a_placeholder_does_not_make_a_cover_look_wrong(self):
+        self.assertFalse(matching.looks_like_a_different_recording(
+            "Something (Cover)", "Someone", "[Private video]"))
+
+
+class GuardDemotionTests(ChainTestCase):
+    """A guard demotes; it never vetoes.
+
+    Preferring an answer that agrees with the upload title is right. Returning
+    nothing when every provider agreed with each other is not — the track ends
+    up FAILED and unorganized, and re-fingerprints on every retry.
+    """
+
+    def _answer(self, **kwargs) -> TrackMetadata:
+        kwargs.setdefault("title", "Just a Boy")
+        kwargs.setdefault("artist", "DrINsaNE")
+        kwargs.setdefault("confidence", 0.94)
+        return TrackMetadata(**kwargs)
+
+    def test_an_unrelated_answer_is_kept_when_nothing_else_answers(self):
+        provider = make_provider("acoustid", result=self._answer())
+        with self.install(provider):
+            result = base.identify(make_context(hint_title="Totally Other Song"))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.title, "Just a Boy")
+        self.assertEqual(result.provider, "acoustid")
+
+    def test_a_title_matching_answer_still_beats_a_demoted_one(self):
+        """The Poté protection: a later provider that agrees with the title wins."""
+        demoted = make_provider("acoustid", result=self._answer(
+            title="when the party's over (Billie Eilish Cover)", artist="Poté",
+            confidence=0.97,
+        ))
+        agreeing = make_provider("shazam", result=self._answer(
+            title="when the party's over", artist="Billie Eilish", confidence=0.80,
+        ))
+        hint = "Billie Eilish - when the party's over (Audio)"
+        with self.install(demoted, agreeing):
+            result = base.identify(make_context(hint_title=hint))
+        self.assertEqual(result.artist, "Billie Eilish")
+        self.assertEqual(result.provider, "shazam")
+
+    def test_a_below_threshold_answer_is_never_kept_as_a_fallback(self):
+        weak = make_provider("acoustid", result=self._answer(confidence=0.20))
+        with self.install(weak):
+            result = base.identify(make_context(hint_title="Totally Other Song"))
+        self.assertIsNone(result)
+
+    def test_an_artist_mismatch_is_preferred_over_a_cover(self):
+        cover = make_provider("acoustid", result=self._answer(
+            title="Dreams (Fleetwood Mac Cover)", artist="Somebody Else",
+        ))
+        mismatch = make_provider("shazam", result=self._answer(
+            title="Dreams", artist="Not Fleetwood",
+        ))
+        with self.install(cover, mismatch):
+            result = base.identify(
+                make_context(hint_title="Fleetwood Mac - Dreams")
+            )
+        self.assertEqual(result.artist, "Not Fleetwood")
+
+    def test_a_kept_fallback_records_which_provider_gave_it(self):
+        provider = make_provider("gemini", result=self._answer())
+        with self.install(provider):
+            result = base.identify(make_context(hint_title="Nothing In Common"))
+        self.assertEqual(result.provider, "gemini")
+
+    def test_a_placeholder_hint_no_longer_costs_the_whole_chain(self):
+        """The exact failure from the library, end to end."""
+        chain = [
+            make_provider(name, result=self._answer())
+            for name in ("acoustid", "shazam", "gemini", "tags")
+        ]
+        with self.install(*chain):
+            result = base.identify(make_context(hint_title="[Deleted video]"))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.artist, "DrINsaNE")
+        # First provider wins outright: with no usable hint there is nothing to
+        # demote it against, so it is not a fallback at all.
+        self.assertEqual(result.provider, "acoustid")
+
+
 class ShazamExcerptWindowTests(SimpleTestCase):
     """Which seconds get sent matters more than how many."""
 

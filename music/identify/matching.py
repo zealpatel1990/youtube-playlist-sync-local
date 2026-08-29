@@ -22,7 +22,39 @@ _NOISE = {
     "music", "released", "release", "original", "soundtrack", "single",
 }
 
+#: What YouTube substitutes for a video it will no longer describe. These are
+#: not titles, and a hint of "[Deleted video]" tokenises to {"deleted"} — which
+#: overlaps nothing, so every guard below fires and the whole chain is vetoed.
+#: Observed on a real library: AcoustID, Shazam, Gemini *and* the file's own
+#: tags all answered "DrINsaNE - JUST A BOY" and all four were discarded.
+#:
+#: `ingest.youtube` maps the same two strings to an Availability. Duplicated
+#: rather than imported because this module stays free of Django and of every
+#: other package, so the naming policy can be unit-tested in isolation.
+PLACEHOLDER_HINTS = frozenset(
+    {
+        "[private video]",
+        "[deleted video]",
+        "[unavailable video]",
+        "[unavailable]",
+        "[removed]",
+        "[no longer available]",
+    }
+)
+
 _WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def usable_hint(hint_title: str) -> str:
+    """The hint, or `""` when it carries no information about the recording.
+
+    Every guard runs this first, so a placeholder is treated as "no hint given"
+    rather than as a title that agrees with nothing.
+    """
+    stripped = (hint_title or "").strip()
+    if stripped.lower() in PLACEHOLDER_HINTS:
+        return ""
+    return stripped
 
 
 def tokens(text: str) -> set[str]:
@@ -51,6 +83,7 @@ def looks_like_a_different_recording(
     cover while the file's title is not, and the credited artist is someone the
     file never mentions.
     """
+    hint_title = usable_hint(hint_title)
     if not hint_title:
         return False
     if not is_derivative(result_title) or is_derivative(hint_title):
@@ -77,6 +110,7 @@ def hint_artist(hint_title: str) -> str:
     name rather than the first half of a song title. Everything else returns ""
     so callers treat the hint as carrying no artist claim at all.
     """
+    hint_title = usable_hint(hint_title)
     if not hint_title:
         return ""
     parts = _ARTIST_SPLIT.split(hint_title, 1)
@@ -115,7 +149,7 @@ def is_unrelated(result_title: str, result_artist: str, hint_title: str) -> bool
     against "Jay Aadhya Shakti" shares no token at all, and only the artist
     saves it — so anything stricter rejects correct answers.
     """
-    hint = tokens(hint_title)
+    hint = tokens(usable_hint(hint_title))
     if not hint:
         return False  # nothing to judge against
     return not (hint & (tokens(result_title) | tokens(result_artist)))

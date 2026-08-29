@@ -187,6 +187,19 @@ def reset_chain() -> None:
         _chain_cache = None
 
 
+#: Demoted answers, best tier first, with the reason logged when one is kept.
+#:
+#: `artist_mismatch` leads because such an answer still shares wording with the
+#: title — only the performer is in doubt. `derivative` trails because a cover
+#: is the one case where a wrong answer actively mis-files the track, so it is
+#: preferred only over giving up entirely.
+FALLBACK_TIERS: tuple[tuple[str, str], ...] = (
+    ("artist_mismatch", "the title naming a different artist"),
+    ("unrelated", "sharing no word with the title"),
+    ("derivative", "looking like a cover or karaoke of it"),
+)
+
+
 def identify(
     ctx: IdentifyContext,
     *,
@@ -198,10 +211,19 @@ def identify(
     caller can report which tier a slow identification is currently in.
     """
     threshold = settings.IDENTIFY_MIN_CONFIDENCE
-    #: An answer good enough to keep but credited to an artist the upload title
-    #: does not mention. Held back in case a later provider agrees with the
-    #: title, and returned unchanged if none does.
-    fallback: TrackMetadata | None = None
+
+    #: Answers a guard objected to, kept by tier instead of thrown away.
+    #:
+    #: A guard **demotes, it does not veto**. Preferring an answer that agrees
+    #: with the upload title is right; leaving a track unidentified when every
+    #: provider agreed with each other is not. Observed on a real library: a
+    #: file whose YouTube title had decayed to "[Deleted video]" was answered
+    #: "DrINsaNE - JUST A BOY" by AcoustID, Shazam, Gemini *and* its own tags,
+    #: and all four were discarded for sharing no word with the placeholder.
+    #:
+    #: Ordered best-first. `derivative` is last because returning a cover
+    #: actively mis-files a track, so it is the true last resort.
+    fallbacks: dict[str, TrackMetadata] = {}
 
     for provider in get_chain():
         if on_provider is not None:
@@ -226,29 +248,9 @@ def identify(
             )
             continue
 
-        if matching.looks_like_a_different_recording(
-            result.title, result.artist, ctx.hint_title
-        ):
-            # A cover, karaoke or instrumental of what was asked for. The
-            # fingerprint of a faithful cover is close enough that providers
-            # return one confidently — AcoustID filed a Billie Eilish download
-            # under Poté at 0.97. Passing lets a later provider answer, and one
-            # usually does.
-            log.info(
-                "provider %s answered '%s - %s' for %s, which looks like a "
-                "different recording of it; continuing",
-                provider.name, result.artist, result.title, ctx.path.name,
-            )
-            continue
-
-        if matching.is_unrelated(result.title, result.artist, ctx.hint_title):
-            log.info(
-                "provider %s answered '%s - %s' for %s, which shares nothing with "
-                "its title; continuing",
-                provider.name, result.artist, result.title, ctx.path.name,
-            )
-            continue
-
+        # The threshold gates first, so nothing below it can ever be kept as a
+        # fallback, and the provider is stamped before any demotion so a kept
+        # answer always records who gave it.
         if result.confidence < threshold:
             log.info(
                 "provider %s scored %.2f on %s, below the %.2f threshold; continuing",
@@ -260,6 +262,35 @@ def identify(
         if not result.provider:
             result = replace(result, provider=provider.name)
 
+        # Guards run worst-first, so an answer tripping several lands in the
+        # most pessimistic tier. Each one warns and demotes; none discards.
+        if matching.looks_like_a_different_recording(
+            result.title, result.artist, ctx.hint_title
+        ):
+            # A cover, karaoke or instrumental of what was asked for. The
+            # fingerprint of a faithful cover is close enough that providers
+            # return one confidently — AcoustID filed a Billie Eilish download
+            # under Poté at 0.97. Passing lets a later provider answer, and one
+            # usually does.
+            if "derivative" not in fallbacks:
+                fallbacks["derivative"] = result
+                log.warning(
+                    "provider %s answered '%s - %s' for %s, which looks like a "
+                    "different recording of it; asking the rest of the chain",
+                    provider.name, result.artist, result.title, ctx.path.name,
+                )
+            continue
+
+        if matching.is_unrelated(result.title, result.artist, ctx.hint_title):
+            if "unrelated" not in fallbacks:
+                fallbacks["unrelated"] = result
+                log.warning(
+                    "provider %s answered '%s - %s' for %s, which shares nothing "
+                    "with its title; asking the rest of the chain",
+                    provider.name, result.artist, result.title, ctx.path.name,
+                )
+            continue
+
         if matching.contradicts_hint_artist(result.artist, ctx.hint_title):
             # Everything above passed and the answer is still probably wrong:
             # the upload title names one artist and this credits another.
@@ -270,9 +301,9 @@ def identify(
             # whoever agrees with the title; keep this as the fallback for when
             # nobody does, which is the common case for uploads whose title
             # simply omits the performer.
-            if fallback is None:
-                fallback = result
-                log.info(
+            if "artist_mismatch" not in fallbacks:
+                fallbacks["artist_mismatch"] = result
+                log.warning(
                     "provider %s answered '%s - %s' for %s, but the title names "
                     "'%s'; asking the rest of the chain",
                     provider.name, result.artist, result.title, ctx.path.name,
@@ -287,17 +318,19 @@ def identify(
         )
         return result
 
-    if fallback is not None:
-        # Nobody corroborated the title. The first acceptable answer is still
-        # better than none — this is exactly what the old chain would have
-        # returned, so a track can never get worse than before.
-        log.info(
-            "identified %s as '%s - %s' via %s (%.2f) — no provider matched the "
-            "title's artist, keeping the first acceptable answer",
-            ctx.path.name, fallback.artist, fallback.title, fallback.provider,
-            fallback.confidence,
+    for tier, why in FALLBACK_TIERS:
+        kept = fallbacks.get(tier)
+        if kept is None:
+            continue
+        # Nobody corroborated the title. An answer every provider agreed on is
+        # still better than none — and `AUTO_ORGANIZE` is off by default, so a
+        # questionable one is reviewed before it moves a file.
+        log.warning(
+            "identified %s as '%s - %s' via %s (%.2f) — kept despite %s; review it",
+            ctx.path.name, kept.artist, kept.title, kept.provider,
+            kept.confidence, why,
         )
-        return fallback
+        return kept
 
     log.info("no provider could identify %s", ctx.path)
     return None
