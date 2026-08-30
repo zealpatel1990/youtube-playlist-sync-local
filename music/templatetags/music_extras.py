@@ -80,6 +80,62 @@ def percent(value) -> str:
         return ""
 
 
+#: How far a candidate's running time may sit from the file's and still read as
+#: the same recording. Matches the tightest band in
+#: `music.identify.textsearch.DURATION_BANDS`, which is what actually scores
+#: them — the panel must not call a gap "exact" that the scorer penalised.
+DURATION_EXACT_SECONDS = 2
+
+
+@register.filter
+def duration_delta(candidate_seconds, file_seconds) -> str:
+    """How a candidate's length compares to the file's: `exact`, `+27s`, `-1:04`.
+
+    Empty when either side is unknown, so a provider that reports no duration
+    simply shows nothing rather than claiming a match with 0.
+    """
+    try:
+        candidate = int(candidate_seconds or 0)
+        actual = int(file_seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if candidate <= 0 or actual <= 0:
+        return ""
+
+    delta = candidate - actual
+    if abs(delta) <= DURATION_EXACT_SECONDS:
+        return "exact"
+    sign = "+" if delta > 0 else "-"
+    size = abs(delta)
+    if size < 60:
+        return f"{sign}{size}s"
+    minutes, seconds = divmod(size, 60)
+    return f"{sign}{minutes}:{seconds:02d}"
+
+
+@register.filter
+def duration_delta_class(candidate_seconds, file_seconds) -> str:
+    """A Bootstrap text class matching how far off `duration_delta` is.
+
+    Three bands rather than a gradient: agreeing, plausibly the same recording
+    with different padding, and long enough that it is probably another cut.
+    """
+    try:
+        candidate = int(candidate_seconds or 0)
+        actual = int(file_seconds or 0)
+    except (TypeError, ValueError):
+        return "text-body-tertiary"
+    if candidate <= 0 or actual <= 0:
+        return "text-body-tertiary"
+
+    delta = abs(candidate - actual)
+    if delta <= DURATION_EXACT_SECONDS:
+        return "text-success-emphasis"
+    if delta <= 15:
+        return "text-body-secondary"
+    return "text-warning-emphasis"
+
+
 #: Bootstrap badge class per job state. Separate from STATE_STYLE because a job
 #: and a track have different lifecycles that happen to share some words.
 JOB_STATE_CLASS: dict[str, str] = {

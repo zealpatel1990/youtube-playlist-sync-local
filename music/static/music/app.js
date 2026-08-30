@@ -237,9 +237,21 @@
         menu.addEventListener('click', function (event) {
             var item = event.target.closest('.provider-menu-item');
             if (!item || !openFor) { return; }
-            var url = openFor.getAttribute('data-identify-url');
-            var provider = item.getAttribute('data-provider') || '';
             var button = openFor;
+
+            // "show close matches" is not a provider: it queues a search and
+            // opens the chooser, which fills itself in on the next SSE update.
+            if (item.hasAttribute('data-suggest')) {
+                var trackId = button.getAttribute('data-track-id');
+                closeMenu();
+                window.htmx.ajax('POST', '/actions/track/' + trackId + '/suggest/',
+                                 {source: document.body, swap: 'none'});
+                openSuggestions(trackId);
+                return;
+            }
+
+            var url = button.getAttribute('data-identify-url');
+            var provider = item.getAttribute('data-provider') || '';
             closeMenu();
             // `source: document.body` is what carries the CSRF token: the
             // header lives in body's hx-headers, and an element outside the
@@ -252,4 +264,49 @@
             button.focus();
         });
     }
+
+    // ------------------------------------------------------ close matches
+    //
+    // The panel refetches itself on `sse:update`, so the job filling in the
+    // candidates is what makes it populate — no polling, and the same signal
+    // the rest of the page already listens to.
+
+    var suggestions = document.getElementById('suggestion-panel');
+
+    function closeSuggestions() {
+        if (!suggestions) { return; }
+        suggestions.hidden = true;
+        // replaceChildren, not an assignment to innerHTML: ToastMarkupTests
+        // greps this whole file for that pattern, and the guard is the only
+        // thing standing between a future edit and the stored-XSS hole (A11).
+        suggestions.replaceChildren();
+    }
+
+    function openSuggestions(trackId) {
+        if (!suggestions || !trackId) { return; }
+        // Fetch once. The fragment that comes back carries its own refresh
+        // trigger while the search is running and drops it once there are
+        // results — setting hx-trigger from here is what stranded the spinner
+        // when the attribute did not take.
+        suggestions.hidden = false;
+        window.htmx.ajax('GET', '/fragments/track/' + trackId + '/suggestions/',
+                         {target: suggestions, swap: 'innerHTML'});
+    }
+
+    if (suggestions) {
+        // Delegated: the contents are replaced on every update, so a listener
+        // bound to a button inside would not survive the first refresh.
+        suggestions.addEventListener('click', function (event) {
+            if (event.target.closest('[data-close-suggestions]')) {
+                // A Use button posts through htmx first; closing here only
+                // hides a panel whose choice has already been sent.
+                setTimeout(closeSuggestions, 0);
+            }
+        });
+    }
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && suggestions && !suggestions.hidden) {
+            closeSuggestions();
+        }
+    });
 })();

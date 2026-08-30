@@ -345,3 +345,133 @@ a.text-decoration-none:hover .badge { filter: brightness(1.12); }
     -webkit-user-select: none;
     user-select: none;
 }
+
+/* --- close matches ------------------------------------------------------
+   A chooser, not a menu: several lines per row, artwork to scan by, and it has
+   to stay readable on a phone. A centred sheet rather than a popover pinned to
+   a button that may sit near the bottom of the screen. */
+
+.suggestion-panel {
+    position: fixed;
+    z-index: 1085;                 /* above the provider menu, under toasts */
+    left: 50%;
+    transform: translateX(-50%);
+    top: 3.5rem;
+    width: min(40rem, calc(100vw - 1.5rem));
+    max-height: min(34rem, calc(100vh - 5rem));
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bs-body-bg);
+}
+.suggestion-panel[hidden] { display: none; }
+
+.suggestion-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .75rem;
+    padding: .8rem .95rem;
+    border-bottom: 1px solid var(--bs-border-color);
+    background: var(--bs-tertiary-bg);
+}
+
+.suggestion-list { overflow-y: auto; }
+
+.suggestion {
+    display: flex;
+    align-items: center;
+    gap: .8rem;
+    padding: .7rem .95rem;
+    border-bottom: 1px solid var(--bs-border-color-translucent);
+}
+.suggestion:last-child { border-bottom: 0; }
+.suggestion:hover { background: var(--bs-tertiary-bg); }
+
+/* The first row is what the ranking considers best; mark it rather than relying
+   on position alone. */
+.suggestion-best { box-shadow: inset 3px 0 0 var(--bs-primary); }
+
+.suggestion-art {
+    width: 48px; height: 48px;
+    border-radius: .3rem;
+    overflow: hidden;
+    background: var(--bs-secondary-bg);
+    border: 1px solid var(--bs-border-color);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--bs-secondary-color);
+}
+.suggestion-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.suggestion-art i { font-size: 1.1rem; opacity: .55; }
+
+.suggestion-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .3rem .45rem;
+    margin-top: .25rem;
+    font-size: .75rem;
+}
+.suggestion-meta .badge { font-size: .68rem; font-weight: 500; }
+
+/* Which source said it, at a glance. The *-subtle / *-text-emphasis pairs are
+   Bootstrap's theme-aware set, so these stay legible in both themes without a
+   second dark-mode block — and without a literal colour, which
+   `test_no_stylesheet_hardcodes_a_page_colour` rightly forbids. */
+.badge[class*="provider-"] { border: 1px solid transparent; }
+.badge.provider-acoustid {
+    background: var(--bs-primary-bg-subtle);
+    color: var(--bs-primary-text-emphasis);
+    border-color: var(--bs-primary-border-subtle);
+}
+.badge.provider-shazam {
+    background: var(--bs-info-bg-subtle);
+    color: var(--bs-info-text-emphasis);
+    border-color: var(--bs-info-border-subtle);
+}
+.badge.provider-tags {
+    background: var(--bs-secondary-bg-subtle);
+    color: var(--bs-secondary-text-emphasis);
+    border-color: var(--bs-secondary-border-subtle);
+}
+.badge.provider-gemini {
+    background: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+    border-color: var(--bs-warning-border-subtle);
+}
+/* The two catalogue searches share `success`, distinguishing them as a pair:
+   they answer from text rather than from the audio, which is the difference
+   that matters when weighing a row. */
+.badge.provider-itunes,
+.badge.provider-deezer {
+    background: var(--bs-success-bg-subtle);
+    color: var(--bs-success-text-emphasis);
+    border-color: var(--bs-success-border-subtle);
+}
+
+/* 44px so Use is a thumb target, not a mouse one. */
+.suggestion .btn { min-height: 44px; min-width: 4rem; }
+
+.suggestion-foot,
+.suggestion-empty {
+    padding: .75rem .95rem;
+    font-size: .82rem;
+    border-top: 1px solid var(--bs-border-color);
+}
+.suggestion-empty { border-top: 0; text-align: center; padding: 2rem 1.25rem; }
+
+@media (max-width: 767.98px) {
+    /* Anchored to the bottom on a phone: closer to the thumb, and it cannot be
+       pushed off-screen by the on-screen keyboard. */
+    .suggestion-panel {
+        top: auto;
+        bottom: 0;
+        left: 0;
+        transform: none;
+        width: 100%;
+        max-height: 82vh;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+    }
+    .suggestion-art { width: 40px; height: 40px; }
+}

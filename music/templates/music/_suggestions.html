@@ -1,0 +1,142 @@
+{% comment %}
+Candidate identifications for one track.
+
+**The fragment declares its own refresh.** While the search is running it asks
+for itself again on the next SSE update *and* after a short delay; once there
+are candidates it declares nothing and stops. Setting `hx-trigger` from
+JavaScript after the fact is what left the spinner running forever when the
+attribute did not take — the markup that needs refreshing is the markup that
+should say so.
+{% endcomment %}
+{% load music_extras %}
+
+<div class="suggestion-head">
+    <div class="min-w-0">
+        <div class="fw-semibold text-truncate">{% if track.title %}{{ track.title }}{% else %}{{ track.path|basename }}{% endif %}</div>
+        <div class="small text-body-secondary text-truncate">
+            {% if track.artist %}{{ track.artist }}{% else %}<span class="fst-italic">no artist yet</span>{% endif %}
+            {% if track.identified_by %}
+                <span class="text-body-tertiary">·</span>
+                <span class="badge bg-body-secondary text-body-secondary border">now: {{ track.identified_by }}</span>
+            {% endif %}
+        </div>
+        {% comment %} The file's own length, which every candidate below is
+           measured against. {% endcomment %}
+        {% if track.duration %}
+        <div class="small text-body-tertiary">
+            <i class="bi bi-file-earmark-music"></i>
+            this file is <span class="fw-semibold font-monospace">{{ track.duration|hms }}</span> long
+        </div>
+        {% endif %}
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0"
+            data-close-suggestions aria-label="Close">
+        <i class="bi bi-x-lg"></i>
+    </button>
+</div>
+
+{% if suggestions %}
+<div class="suggestion-list">
+    {% for index, s in suggestions %}
+    <div class="suggestion{% if forloop.first %} suggestion-best{% endif %}">
+        <div class="suggestion-art flex-shrink-0">
+            {% if s.cover_url %}
+                <img src="{{ s.cover_url }}" alt="" loading="lazy" decoding="async"
+                     onerror="this.closest('.suggestion-art').classList.add('cover-missing');this.remove();">
+            {% else %}<i class="bi bi-disc"></i>{% endif %}
+        </div>
+
+        <div class="min-w-0 flex-grow-1">
+            <div class="fw-semibold text-truncate">{{ s.title }}</div>
+            <div class="small text-truncate">{{ s.artist|default:"Unknown artist" }}</div>
+            <div class="small text-body-secondary text-truncate">
+                {% if s.album %}{{ s.album }}{% else %}<span class="fst-italic">no album</span>{% endif %}
+                {% if s.year %}<span class="text-body-tertiary"> · {{ s.year }}</span>{% endif %}
+            </div>
+            <div class="suggestion-meta">
+                <span class="badge provider-{{ s.provider }}">{{ s.provider }}</span>
+                {% comment %} The provider's own running time, and how it
+                   compares to the file — the single most telling thing about
+                   whether this row is the same recording. {% endcomment %}
+                {% if s.duration %}
+                    <span class="badge bg-body-secondary text-body-secondary border font-monospace"
+                          title="This release runs {{ s.duration|hms }}; the file runs {{ track.duration|hms }}">
+                        {{ s.duration|hms }}
+                        {% with delta=s.duration|duration_delta:track.duration %}
+                        {% if delta %}
+                            <span class="{{ s.duration|duration_delta_class:track.duration }}">{{ delta }}</span>
+                        {% endif %}
+                        {% endwith %}
+                    </span>
+                {% endif %}
+                {% if s.genre %}
+                    <span class="badge bg-body-secondary text-body-secondary border">{{ s.genre }}</span>
+                {% endif %}
+                {% if s.track_no %}
+                    <span class="badge bg-body-secondary text-body-secondary border">
+                        track {% if s.disc_no > 1 %}{{ s.disc_no }}–{% endif %}{{ s.track_no }}
+                    </span>
+                {% else %}
+                    <span class="text-warning-emphasis" title="Plex builds the filename from the track number; without one this files as just the title">
+                        <i class="bi bi-exclamation-triangle"></i> no track number
+                    </span>
+                {% endif %}
+                {% if s.is_compilation %}<span class="badge bg-body-secondary text-body-secondary border">Various Artists</span>{% endif %}
+                {% if s.confidence %}<span class="text-body-tertiary">{{ s.confidence|percent }}</span>{% endif %}
+            </div>
+        </div>
+
+        <button type="button" class="btn btn-sm {% if forloop.first %}btn-primary{% else %}btn-outline-primary{% endif %} flex-shrink-0"
+                hx-post="{% url 'action_apply_suggestion' track.id index %}" hx-swap="none"
+                data-close-suggestions>
+            Use
+        </button>
+    </div>
+    {% endfor %}
+</div>
+<div class="suggestion-foot text-body-secondary">
+    Choosing one marks the track identified and plans its move.
+    <strong>Nothing is written to disk</strong> until you apply moves.
+</div>
+
+{% elif searching %}
+{% comment %} Self-refreshing until the job lands: SSE normally, and a timed
+   retry as the backstop so a missed event cannot strand the spinner. {% endcomment %}
+<div class="suggestion-empty text-body-secondary"
+     hx-get="{% url 'fragment_suggestions' track.id %}"
+     hx-trigger="sse:update from:body, load delay:3s"
+     hx-target="#suggestion-panel" hx-swap="innerHTML">
+    <div class="spinner-border spinner-border-sm mb-2"></div>
+    <div>Asking AcoustID, Shazam, Apple Music and Deezer…</div>
+    <div class="small text-body-tertiary mt-1">
+        Shazam is sampled at two points in the track, and the catalogue
+        searches then look up whatever it recognised.
+    </div>
+</div>
+
+{% elif not has_run %}
+<div class="suggestion-empty text-body-secondary">
+    <i class="bi bi-arrow-repeat fs-4 d-block mb-2"></i>
+    <div>Nothing searched yet.</div>
+    <div class="small text-body-tertiary mt-1">
+        Results are held in memory and cleared when the service restarts.
+    </div>
+    <button type="button" class="btn btn-sm btn-primary mt-3"
+            hx-post="{% url 'action_suggest_track' track.id %}" hx-swap="none">
+        <i class="bi bi-search"></i> Search for matches
+    </button>
+</div>
+
+{% else %}
+<div class="suggestion-empty text-body-secondary">
+    <i class="bi bi-search fs-4 d-block mb-2"></i>
+    <div>No candidates.</div>
+    <div class="small text-body-tertiary mt-1">
+        No index recognises this audio and no catalogue matched its text. A
+        trimmed or edited upload is invisible to AcoustID by design, a
+        slowed-down one to Shazam, and Apple Music and Deezer can only find
+        what the file already names — Gemini, which reads the title instead,
+        is the fallback.
+    </div>
+</div>
+{% endif %}

@@ -121,6 +121,19 @@ missing is never offered — and the view rejects it even if it were.
             data-provider="">
         <i class="bi bi-list-nested"></i> whole chain
     </button>
+    {% comment %} Not a provider: asks every one of them and lets you choose. {% endcomment %}
+    <button type="button" class="provider-menu-item provider-menu-suggest" role="menuitem"
+            data-suggest="1">
+        <i class="bi bi-list-stars"></i> show close matches…
+    </button>
 </div>
+
+{% comment %}
+Where the candidate list lands. Outside #tracks-panel for the same reason the
+menu is: that panel is replaced on every SSE update, and a chooser inside it
+would vanish while being read.
+{% endcomment %}
+<div id="suggestion-panel" class="card shadow suggestion-panel" hidden
+     role="dialog" aria-modal="false" aria-label="Close matches"></div>
 
 {% endblock %}

@@ -450,3 +450,83 @@ def _as_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def parse_lookup_candidates(payload: dict, ctx: IdentifyContext) -> list[TrackMetadata]:
+    """Every recording/release pair the lookup offered, best first.
+
+    `parse_lookup` answers "what is this file?" with one row, which is what the
+    chain needs. This answers "what could it be?", which is what a person needs
+    when the chain guessed wrong — and the two must not share a code path, or
+    tuning the picker would quietly change identification.
+
+    One recording usually carries several releases, and the release is what
+    decides the album and track number, so it decides the Plex path. Measured on
+    a real library: "Tose Naina" came back as one recording across seven
+    releases — seven genuinely different filings of the same song.
+    """
+    if payload.get("status") != "ok":
+        return []
+
+    candidates: list[TrackMetadata] = []
+    seen: set[tuple] = set()
+
+    for result in sorted(
+        (r for r in (payload.get("results") or []) if isinstance(r, dict)),
+        key=lambda r: _as_float(r.get("score")),
+        reverse=True,
+    ):
+        score = min(1.0, max(0.0, _as_float(result.get("score"))))
+        for recording in result.get("recordings") or []:
+            if not isinstance(recording, dict):
+                continue
+            title = str(recording.get("title") or "").strip()
+            if not title:
+                continue
+            artist, _ = _artist_credit(recording)
+            releases = [r for r in (recording.get("releases") or []) if isinstance(r, dict)]
+
+            # A recording with no release still names the song; it just cannot
+            # say which album it belongs to.
+            for release in releases or [None]:
+                album = album_artist = release_id = cover_url = ""
+                is_compilation = False
+                year = disc_no = track_no = 0
+                if release is not None:
+                    album = str(release.get("title") or "").strip()
+                    album_artist, is_compilation = _artist_credit(release)
+                    year = _release_year(release)
+                    disc_no, track_no = _track_position(release)
+                    release_id = str(release.get("id") or "")
+                    if release_id:
+                        cover_url = (
+                            f"https://coverartarchive.org/release/{release_id}/front-500"
+                        )
+                if is_compilation:
+                    album_artist = VARIOUS_ARTISTS
+
+                # What the person is actually choosing between. Two releases
+                # that agree on all of it would be the same row on screen.
+                key = (artist, title, album, track_no, disc_no)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                candidates.append(
+                    TrackMetadata(
+                        title=title,
+                        artist=artist,
+                        album=album,
+                        album_artist=album_artist,
+                        track_no=track_no,
+                        disc_no=disc_no,
+                        year=year,
+                        is_compilation=is_compilation,
+                        musicbrainz_recording_id=str(recording.get("id") or ""),
+                        musicbrainz_release_id=release_id,
+                        cover_url=cover_url,
+                        confidence=score,
+                        provider=AcoustidProvider.name,
+                    )
+                )
+    return candidates

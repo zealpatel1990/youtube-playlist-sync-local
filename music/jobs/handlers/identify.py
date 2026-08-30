@@ -7,6 +7,7 @@ from pathlib import Path
 
 from django.conf import settings
 
+from music.core import events
 from music.core.locks import track_locks
 from music.models import Track, TrackState
 from music.jobs import engine
@@ -163,3 +164,102 @@ def identify_pending(job_obj) -> str:
         )
         queued += 1
     return f"queued {queued} track(s) for identification"
+
+
+@job("identify.suggest", max_attempts=2, cooldown=True,
+     description="Collect candidate identifications for one track to choose from")
+def suggest_track(job_obj) -> str:
+    """Ask the providers what this file *could* be, and hold the answers.
+
+    Additive by design: it never writes to the Track. Nothing is true of the
+    track until a person picks a row, which `identify.accept` then applies
+    through the same fields an identification would.
+    """
+    from music.identify import IdentifyContext, suggest
+    from music.library import tagio
+
+    track_id = job_obj.payload.get("track_id")
+    if not track_id:
+        return "no track_id in payload; nothing to do"
+
+    with track_locks.acquire(f"track:{track_id}") as acquired:
+        if not acquired:  # pragma: no cover - only reachable with a timeout
+            return "track busy"
+
+        track = Track.objects.filter(pk=track_id).first()
+        if track is None:
+            return f"track {track_id} no longer exists"
+
+        path = Path(track.path)
+        if not path.exists():
+            return f"file missing: {track.path}"
+
+        hint_title = hint_url = ""
+        video = getattr(track, "youtube_video", None)
+        if video is not None:
+            hint_title, hint_url = video.title, video.url
+
+        engine.heartbeat(job_obj, f"looking for matches: {path.name[:60]}")
+        candidates = suggest.collect(
+            IdentifyContext(
+                path=path,
+                duration=track.duration,
+                fingerprint=track.fingerprint,
+                existing=tagio.read_tags(path),
+                hint_title=hint_title,
+                hint_url=hint_url,
+            )
+        )
+        suggest.remember(track.pk, candidates)
+
+    events.bump("tracks")
+    return f"{len(candidates)} suggestion(s) for {path.name}"
+
+
+@job("identify.accept", max_attempts=2,
+     description="Apply a suggestion a person chose as the track's identification")
+def accept_suggestion(job_obj) -> str:
+    """Write one chosen candidate onto the track, exactly as the chain would.
+
+    Goes through `_apply_metadata` and `_IDENTIFIED_FIELDS` rather than setting
+    fields here, so a hand-picked answer and a provider's own land identically —
+    and a field added to one is added to both.
+    """
+    from music.identify import suggest
+
+    track_id = job_obj.payload.get("track_id")
+    index = job_obj.payload.get("index")
+    if track_id is None or index is None:
+        return "no track_id/index in payload; nothing to do"
+
+    with track_locks.acquire(f"track:{track_id}") as acquired:
+        if not acquired:  # pragma: no cover - only reachable with a timeout
+            return "track busy"
+
+        candidates = suggest.recall(track_id)
+        if not 0 <= int(index) < len(candidates):
+            # The set expired or was replaced while the panel was open. Saying
+            # so beats writing whatever now sits at that position.
+            return "that suggestion is no longer available; search again"
+        chosen = candidates[int(index)]
+
+        track = Track.objects.filter(pk=track_id).first()
+        if track is None:
+            return f"track {track_id} no longer exists"
+
+        _apply_metadata(track, chosen)
+        track.clear_failure()
+        track.state = TrackState.IDENTIFIED
+        track.save(update_fields=_IDENTIFIED_FIELDS)
+
+        # The choice is made; the rest are no longer offers.
+        suggest.forget(track_id)
+
+        engine.enqueue(
+            "organize.track",
+            {"track_id": track.pk, "apply": bool(settings.AUTO_ORGANIZE)},
+            dedup_key=f"organize.track:{track.pk}",
+        )
+
+    events.bump("tracks")
+    return f"accepted {chosen.provider}: {chosen.artist} - {chosen.title}"

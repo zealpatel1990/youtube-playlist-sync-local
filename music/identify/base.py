@@ -43,6 +43,15 @@ class TrackMetadata:
     musicbrainz_recording_id: str = ""
     musicbrainz_release_id: str = ""
     cover_url: str = ""
+    #: The running time of the recording the *provider* is describing, in
+    #: seconds. Informational only, and deliberately absent from
+    #: `_IDENTIFIED_FIELDS`: `Track.duration` is measured from the file on disk
+    #: and must never be replaced by a catalogue's idea of how long the song
+    #: is. What this is for is judging an answer — comparing it against the
+    #: file's own length is how a remix or a radio edit gives itself away, and
+    #: showing both is what lets a person see why a row ranked where it did.
+    #: 0 when the provider does not say, as with every other unknown number.
+    duration: int = 0
     #: 0.0–1.0, compared against settings.IDENTIFY_MIN_CONFIDENCE.
     confidence: float = 0.0
     provider: str = ""
@@ -113,6 +122,8 @@ def _provider_classes() -> dict[str, type[Provider]]:
         ("tags", "music.identify.tags", "TagsProvider"),
         ("acoustid", "music.identify.acoustid", "AcoustidProvider"),
         ("shazam", "music.identify.shazam", "ShazamProvider"),
+        ("itunes", "music.identify.textsearch", "ItunesProvider"),
+        ("deezer", "music.identify.textsearch", "DeezerProvider"),
         ("gemini", "music.identify.gemini", "GeminiProvider"),
     ):
         try:
@@ -345,7 +356,7 @@ def identify(
             ctx.path.name, result.artist, result.title, result.provider,
             result.confidence,
         )
-        return result
+        return _enriched(result, ctx)
 
     for tier, why in FALLBACK_TIERS:
         kept = fallbacks.get(tier)
@@ -359,7 +370,24 @@ def identify(
             ctx.path.name, kept.artist, kept.title, kept.provider,
             kept.confidence, why,
         )
-        return kept
+        return _enriched(kept, ctx)
 
     log.info("no provider could identify %s", ctx.path)
     return None
+
+
+def _enriched(result: TrackMetadata, ctx: IdentifyContext) -> TrackMetadata:
+    """Fill the answer's blanks from a catalogue. Never fails the caller.
+
+    Imported here rather than at module scope because `textsearch` imports this
+    module; the pattern is the same one the providers use for their optional
+    dependencies. A failure returns the unenriched answer — an identification
+    that succeeded must never be lost to a cosmetic follow-up call.
+    """
+    try:
+        from . import textsearch
+
+        return textsearch.enrich(result, ctx)
+    except Exception:
+        log.exception("enrichment failed for %s; keeping the answer as given", ctx.path)
+        return result

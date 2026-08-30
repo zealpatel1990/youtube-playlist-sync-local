@@ -26,12 +26,13 @@ import types
 from pathlib import Path
 from unittest import mock
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
 from music import views
 from music.core import envfile, events
 from music.jobs import registry
+from music.templatetags import music_extras
 from music.models import Job, JobState, Track, TrackState, YoutubeVideo
 
 #: kind -> the view that enqueues it. Kept explicit so a renamed job kind fails
@@ -757,3 +758,77 @@ class EnvFileTests(TestCase):
     def test_a_line_break_in_a_value_is_refused(self):
         with self.assertRaises(ValueError):
             envfile.set_values({"PLAYLIST_URL": "a\nYTDLP_PATH=/evil"}, self.path)
+
+
+class DurationDeltaFilterTests(SimpleTestCase):
+    """How a candidate's running time is shown against the file's.
+
+    This is the panel's main evidence: a remix and the album cut share a title
+    and an artist, and the length is what separates them. The screenshot that
+    prompted these had four "Hookah Bar" rows and no way to tell them apart.
+    """
+
+    def test_a_matching_length_reads_as_exact(self):
+        self.assertEqual(music_extras.duration_delta(195, 195), "exact")
+
+    def test_a_second_either_way_still_reads_as_exact(self):
+        # DURATION_BANDS scores +/-2s as the top band; the panel must agree.
+        self.assertEqual(music_extras.duration_delta(383, 382), "exact")
+        self.assertEqual(music_extras.duration_delta(293, 295), "exact")
+
+    def test_a_longer_candidate_is_signed(self):
+        self.assertEqual(music_extras.duration_delta(222, 195), "+27s")
+
+    def test_a_shorter_candidate_is_signed(self):
+        self.assertEqual(music_extras.duration_delta(230, 257), "-27s")
+
+    def test_a_gap_over_a_minute_is_shown_as_minutes(self):
+        self.assertEqual(music_extras.duration_delta(295, 3372), "-51:17")
+
+    def test_an_unknown_length_on_either_side_shows_nothing(self):
+        # Shazam reports no duration at all; a bare 0 must not read as a match.
+        self.assertEqual(music_extras.duration_delta(0, 195), "")
+        self.assertEqual(music_extras.duration_delta(195, 0), "")
+
+    def test_junk_is_survivable(self):
+        self.assertEqual(music_extras.duration_delta("nonsense", 195), "")
+        self.assertEqual(music_extras.duration_delta(None, None), "")
+
+    def test_the_class_tracks_how_far_off_it_is(self):
+        self.assertEqual(
+            music_extras.duration_delta_class(195, 195), "text-success-emphasis"
+        )
+        self.assertEqual(
+            music_extras.duration_delta_class(205, 195), "text-body-secondary"
+        )
+        self.assertEqual(
+            music_extras.duration_delta_class(295, 3372), "text-warning-emphasis"
+        )
+
+    def test_an_unknown_length_is_never_styled_as_agreement(self):
+        self.assertEqual(
+            music_extras.duration_delta_class(0, 195), "text-body-tertiary"
+        )
+
+    def test_exact_matches_the_scorers_tightest_band(self):
+        from music.identify import textsearch
+
+        tightest_seconds, _ = textsearch.DURATION_BANDS[0]
+        self.assertEqual(music_extras.DURATION_EXACT_SECONDS, tightest_seconds)
+
+
+class SuggestionPanelDurationTests(SimpleTestCase):
+    """The panel renders both lengths so a person can judge a row."""
+
+    def test_the_metadata_carries_the_providers_own_length(self):
+        from music.identify.base import TrackMetadata
+
+        meta = TrackMetadata(title="T", artist="A", duration=195)
+        self.assertEqual(meta.duration, 195)
+
+    def test_duration_is_not_written_to_the_track(self):
+        # Track.duration is measured from the file; a catalogue's idea of the
+        # song's length must never overwrite it.
+        from music.jobs.handlers.identify import _IDENTIFIED_FIELDS
+
+        self.assertNotIn("duration", _IDENTIFIED_FIELDS)

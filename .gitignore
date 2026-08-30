@@ -30,8 +30,8 @@ staging/
 # Local test sandbox. Mirrors the Pi's layout so the dev setup and the real one
 # differ only in paths:
 #
-#   _devdata/music/          <- /media/pi/500gb hdd/Music          (scan root)
-#   _devdata/youtube_music/  <- /media/pi/500gb hdd/Youtube_Music  (scan root)
+#   _devdata/music/          <- /media/pi/MUSIC/Music          (scan root)
+#   _devdata/youtube_music/  <- /media/pi/MUSIC/Youtube_Music  (scan root)
 #   _devdata/library/        <- LIBRARY_ROOT, where organized files land
 #   _devdata/staging/        <- DOWNLOAD_STAGING, pre-identification downloads
 #   _devdata/db/             <- SQLite for the container

@@ -1291,3 +1291,88 @@ def update_settings(request):
         "success",
         closeSettings=True,
     )
+
+
+# --------------------------------------------------------------------------
+# Suggestions - "what else could this be?"
+# --------------------------------------------------------------------------
+#
+# Additive: nothing here runs during identification. A person asks, the
+# providers are re-queried, the answers are held in memory by the
+# `identify.suggest` job, and only an explicit pick writes to the Track.
+
+
+@require_POST
+def action_suggest_track(request, pk: int):
+    """Queue a search for candidate identifications for one track."""
+    track = _track_or_404(pk)
+    return _queued(
+        "identify.suggest",
+        f"Looking for matches: {track['label']}",
+        {"track_id": track["id"]},
+        dedup_key=f"identify.suggest:{track['id']}",
+        priority=3,
+    )
+
+
+def fragment_suggestions(request, pk: int):
+    """The candidate list for one track, as a panel the row menu opens.
+
+    Refetched on `sse:update`, so it fills in by itself when the job lands
+    rather than leaving the reader to guess whether it is still running.
+    """
+    from music.identify import suggest
+
+    track = get_object_or_404(
+        Track.objects.only(
+            # `duration` is what every candidate is judged against, so the
+            # panel shows it beside them rather than making the reader guess
+            # why a five-minute remix outranked the album cut.
+            "id", "path", "title", "artist", "identified_by", "duration",
+        ),
+        pk=pk,
+    )
+    return render(
+        request,
+        "music/_suggestions.html",
+        {
+            "track": track,
+            # The index is the identity: the store holds a list, and the accept
+            # job re-reads it under the track lock before using one.
+            "suggestions": list(enumerate(suggest.recall(pk))),
+            # This track's search, not any track's. The dedup key carries the
+            # id and is a plain column, so it is queryable where `payload`
+            # (JSON) is not on SQLite. Matching on kind alone made one queued
+            # job elsewhere show every track as still searching.
+            "searching": Job.objects.filter(
+                dedup_key=f"identify.suggest:{pk}", state__in=JobState.active()
+            ).exists(),
+            # Distinguishes "found nothing" from "never asked" — the store is
+            # in memory, so a restart legitimately leaves the latter.
+            "has_run": suggest.has_run(pk),
+        },
+    )
+
+
+@require_POST
+def action_apply_suggestion(request, pk: int, index: int):
+    """Accept one candidate as this track's identification."""
+    from music.identify import suggest
+
+    candidates = suggest.recall(pk)
+    if not 0 <= index < len(candidates):
+        return _notify("That suggestion has expired - search again.", "warning")
+    chosen = candidates[index]
+
+    job, error = _enqueue(
+        "identify.accept",
+        {"track_id": pk, "index": index},
+        dedup_key=f"identify.accept:{pk}",
+        priority=2,
+    )
+    if job is None:
+        return _notify(error, "danger")
+    label = f"Using: {chosen.artist} - {chosen.title}"
+    if chosen.album:
+        label += f" [{chosen.album}]"
+    return _notify(label, "info")

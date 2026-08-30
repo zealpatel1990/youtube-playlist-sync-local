@@ -220,6 +220,32 @@ GEMINI_DAILY_BUDGET = env_int("GEMINI_DAILY_BUDGET", default=400, minimum=0)
 SHAZAM_ENABLED = env_bool("SHAZAM_ENABLED", default=True)
 SHAZAM_RATE_PER_MIN = env_float("SHAZAM_RATE_PER_MIN", default=20.0, minimum=0.1)
 
+#: Apple Music and Deezer catalogue search. Neither needs a key or an account.
+#: They search *text*, not audio — see `music/identify/textsearch.py` — so they
+#: belong after the fingerprinting tiers and before Gemini, which is the other
+#: provider that only ever reads a title and is the one with a real quota.
+ITUNES_ENABLED = env_bool("ITUNES_ENABLED", default=True)
+#: Apple publishes no documented ceiling and returns 403 under sustained load;
+#: about 20/min is what the Store's own search box generates, and the whole
+#: library is a one-off sweep rather than steady traffic.
+ITUNES_RATE_PER_MIN = env_float("ITUNES_RATE_PER_MIN", default=20.0, minimum=0.1)
+#: Which Apple storefront to search. "US" is the default because that is what
+#: the provider was measured against, and it carries the Indian film catalogue
+#: this library is mostly made of. "IN" ranks regional titles higher.
+ITUNES_COUNTRY = env_str("ITUNES_COUNTRY", default="US")
+
+#: After the chain settles on an answer, look it up in a catalogue and fill in
+#: whatever it left blank — album, year, track and disc number, cover art.
+#: Shazam and Gemini both return a bare title and artist, and the track number
+#: is the one field the Plex filename cannot be built without.
+#: Costs at most one extra keyless GET per identified track, and none at idle.
+IDENTIFY_ENRICH = env_bool("IDENTIFY_ENRICH", default=True)
+
+DEEZER_ENABLED = env_bool("DEEZER_ENABLED", default=True)
+#: Deezer documents a 50-requests-per-5-seconds ceiling per IP. Nowhere near
+#: it — this is set to be a polite neighbour, not to go fast.
+DEEZER_RATE_PER_MIN = env_float("DEEZER_RATE_PER_MIN", default=30.0, minimum=0.1)
+
 #: A provider result below this confidence is discarded and the chain continues.
 IDENTIFY_MIN_CONFIDENCE = env_float(
     "IDENTIFY_MIN_CONFIDENCE", default=0.5, minimum=0.0, maximum=1.0
@@ -327,7 +353,7 @@ LOGGING = {
 # Startup validation
 # --------------------------------------------------------------------------
 
-_VALID_PROVIDERS = {"tags", "acoustid", "shazam", "gemini"}
+_VALID_PROVIDERS = {"tags", "acoustid", "shazam", "itunes", "deezer", "gemini"}
 _unknown = set(IDENTIFY_CHAIN) - _VALID_PROVIDERS
 if _unknown:
     raise ImproperlyConfigured(

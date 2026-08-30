@@ -14,13 +14,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import threading
+import urllib.parse
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 
 from music.identify import acoustid as acoustid_module
-from music.identify import base, gemini as gemini_module, matching, shazam as shazam_module
+from music.identify import (
+    base,
+    gemini as gemini_module,
+    matching,
+    shazam as shazam_module,
+    suggest,
+    textsearch,
+)
 from music.identify.acoustid import AcoustidProvider
 from music.identify.base import IdentifyContext, Provider, TrackMetadata
 from music.identify.gemini import GeminiProvider
@@ -65,8 +76,16 @@ def make_provider(name, *, result=None, reason="", error=None):
     )
 
 
+@override_settings(IDENTIFY_ENRICH=False)
 class ChainTestCase(SimpleTestCase):
-    """Base for tests that install a synthetic provider set."""
+    """Base for tests that install a synthetic provider set.
+
+    Enrichment is off here because it is the one step in `identify()` that
+    reaches the network on its own — these tests assert chain *order* and
+    guard behaviour, and letting a real Apple lookup run for each one put 28
+    seconds of live HTTP into a suite whose whole point is that it has none.
+    `CatalogueEnrichmentTests` covers it with the calls mocked.
+    """
 
     def setUp(self):
         base.reset_chain()
@@ -1138,3 +1157,734 @@ class ShazamExcerptWindowTests(SimpleTestCase):
         self.assertLessEqual(
             shazam_module._excerpt_start(3600), shazam_module.EXCERPT_MAX_START_SECONDS
         )
+
+
+# --- catalogue search (iTunes / Deezer) ---------------------------------
+
+
+ITUNES_PAYLOAD = {
+    "resultCount": 2,
+    "results": [
+        {
+            "trackName": "Zara Zara (Jhankar Beats)",
+            "artistName": "Bombay Jayashri, Harris Jayaraj & Sameer",
+            "collectionName": "Zara Zara (Jhankar Beats) - Single",
+            "trackNumber": 1,
+            "discNumber": 1,
+            "releaseDate": "2024-03-15T12:00:00Z",
+            "trackTimeMillis": 295000,
+            "artworkUrl100": "https://is1.mzstatic.com/image/thumb/x/100x100bb.jpg",
+        },
+        {
+            "trackName": "Zara Zara (Deep House Mix)",
+            "artistName": "Bombay Jayashri, Harris Jayaraj & Sameer",
+            "collectionName": "Zara Zara (Deep House Mix) - Single",
+            "trackNumber": 1,
+            "discNumber": 1,
+            "releaseDate": "2023-01-01T12:00:00Z",
+            "trackTimeMillis": 322000,
+        },
+    ],
+}
+
+DEEZER_PAYLOAD = {
+    "data": [
+        {
+            "title": "Just a Boy",
+            "artist": {"name": "DrINsaNE"},
+            "album": {
+                "title": "Just a Boy",
+                "cover_medium": "https://e-cdn.dzcdn.net/250.jpg",
+                "cover_big": "https://e-cdn.dzcdn.net/500.jpg",
+            },
+            "duration": 195,
+            "release_date": "2025-11-28",
+        }
+    ]
+}
+
+
+def _json_response(payload) -> FakeHTTPResponse:
+    return FakeHTTPResponse(json.dumps(payload).encode())
+
+
+@override_settings(
+    ITUNES_ENABLED=True,
+    ITUNES_RATE_PER_MIN=6000.0,
+    ITUNES_COUNTRY="US",
+    DEEZER_ENABLED=True,
+    DEEZER_RATE_PER_MIN=6000.0,
+    PROVIDER_TIMEOUT_SECONDS=5.0,
+)
+class CatalogueSearchTests(SimpleTestCase):
+    """The keyless text-search providers. Every HTTP call is mocked."""
+
+    def setUp(self):
+        textsearch.reset_for_tests()
+        self.addCleanup(textsearch.reset_for_tests)
+
+    def _respond(self, payload):
+        return mock.patch(
+            "urllib.request.urlopen", return_value=_json_response(payload)
+        )
+
+    # -- query building --
+
+    def test_tags_are_preferred_over_the_upload_title(self):
+        ctx = make_context(
+            existing=TrackMetadata(title="Zara Zara", artist="Bombay Jayashri"),
+            hint_title="Zara Zara Full Video Song | RHTDM",
+        )
+        self.assertEqual(textsearch.queries_for(ctx)[0], "Zara Zara Bombay Jayashri")
+
+    def test_the_album_artist_stands_in_when_there_is_no_artist(self):
+        ctx = make_context(
+            existing=TrackMetadata(title="Iktara", album_artist="Amit Trivedi")
+        )
+        self.assertEqual(textsearch.queries_for(ctx)[0], "Iktara Amit Trivedi")
+
+    def test_a_placeholder_upload_title_is_not_searched(self):
+        ctx = make_context(hint_title="[Deleted video]")
+        lowered = [q.lower() for q in textsearch.queries_for(ctx)]
+        self.assertNotIn("[deleted video]", lowered)
+
+    def test_the_filename_is_the_last_resort(self):
+        ctx = make_context(path=Path("/library/Some_Song.mp3"))
+        self.assertEqual(textsearch.queries_for(ctx), ["Some Song"])
+
+    def test_queries_are_deduplicated(self):
+        ctx = make_context(
+            path=Path("/library/Iktara.mp3"),
+            existing=TrackMetadata(title="Iktara"),
+            hint_title="iktara",
+        )
+        self.assertEqual(len(textsearch.queries_for(ctx)), 1)
+
+    # -- scoring --
+
+    def test_an_exact_duration_scores_highest(self):
+        self.assertEqual(textsearch._confidence(195, 195), 0.90)
+
+    def test_confidence_falls_as_the_duration_drifts(self):
+        scores = [textsearch._confidence(d, 200) for d in (200, 204, 210, 240, 400)]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_a_wildly_different_duration_lands_below_the_threshold(self):
+        # A 56-minute jukebox against a 5-minute catalogue entry.
+        self.assertLess(textsearch._confidence(293, 3372), 0.5)
+
+    def test_an_unknown_duration_cannot_score_highly(self):
+        self.assertEqual(
+            textsearch._confidence(0, 195), textsearch.CONFIDENCE_UNVERIFIED
+        )
+        self.assertLess(textsearch.CONFIDENCE_UNVERIFIED, 0.5)
+
+    # -- relevance --
+    #
+    # Both rejections below were real false positives, at 0.82 and 0.52, before
+    # MIN_QUERY_COVERAGE replaced a single-shared-word test.
+
+    def test_a_row_sharing_only_an_incidental_word_is_rejected(self):
+        meta = TrackMetadata(
+            title="Haqiqi (feat. Aditi Paul & Kiran Kamath) [Remix]",
+            artist="Justin-Uday Duo",
+        )
+        self.assertFalse(
+            textsearch._is_relevant(meta, "Diwali Mela Final Alex & Kiran")
+        )
+
+    def test_the_right_artist_with_the_wrong_title_is_rejected(self):
+        meta = TrackMetadata(
+            title="Edvard Grieg In The Hall Of The Mountain King",
+            artist="Daniel B. George",
+        )
+        self.assertFalse(
+            textsearch._is_relevant(meta, "Merry Christmas Daniel B. George")
+        )
+
+    def test_a_genuine_match_survives(self):
+        meta = TrackMetadata(title="JUST A BOY", artist="DrINsaNE")
+        self.assertTrue(textsearch._is_relevant(meta, "JUST A BOY DrINsaNE"))
+
+    def test_a_transliterated_variant_survives(self):
+        meta = TrackMetadata(
+            title="Main Zindagi Ka Saath Nibhata Chala Gaya", artist="Mohd. Rafi"
+        )
+        self.assertTrue(
+            textsearch._is_relevant(meta, "Main Zindagi Ka Saath Mohd Rafi")
+        )
+
+    def test_an_uncomparable_query_defers_rather_than_guessing(self):
+        meta = TrackMetadata(title="Anything", artist="Anyone")
+        self.assertTrue(textsearch._is_relevant(meta, "07 08 09"))
+
+    # -- mapping --
+
+    def test_itunes_supplies_track_and_disc_numbers(self):
+        ctx = make_context(
+            duration=295,
+            existing=TrackMetadata(
+                title="Zara Zara (Jhankar Beats)", artist="Bombay Jayashri"
+            ),
+        )
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.ItunesProvider().identify(ctx)
+
+        self.assertEqual(result.title, "Zara Zara (Jhankar Beats)")
+        self.assertEqual(result.track_no, 1)
+        self.assertEqual(result.disc_no, 1)
+        self.assertEqual(result.year, 2024)
+        self.assertEqual(result.provider, "itunes")
+        self.assertEqual(result.confidence, 0.90)
+
+    def test_the_row_whose_duration_fits_wins(self):
+        # The 322s Deep House mix is a real alternative; the file is 295s.
+        ctx = make_context(
+            duration=295,
+            existing=TrackMetadata(title="Zara Zara", artist="Bombay Jayashri"),
+        )
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.ItunesProvider().identify(ctx)
+
+        self.assertIn("Jhankar", result.title)
+
+    def test_deezer_maps_its_nested_artist_and_album(self):
+        ctx = make_context(
+            duration=195,
+            existing=TrackMetadata(title="Just a Boy", artist="DrINsaNE"),
+        )
+        with self._respond(DEEZER_PAYLOAD):
+            result = textsearch.DeezerProvider().identify(ctx)
+
+        self.assertEqual(result.artist, "DrINsaNE")
+        self.assertEqual(result.album, "Just a Boy")
+        self.assertEqual(result.year, 2025)
+        self.assertEqual(result.provider, "deezer")
+
+    def test_a_deezer_row_carries_no_track_number(self):
+        ctx = make_context(
+            duration=195,
+            existing=TrackMetadata(title="Just a Boy", artist="DrINsaNE"),
+        )
+        with self._respond(DEEZER_PAYLOAD):
+            result = textsearch.DeezerProvider().identify(ctx)
+
+        self.assertEqual(result.track_no, 0)
+
+    # -- artwork --
+
+    def test_itunes_artwork_is_upscaled_from_the_thumbnail_url(self):
+        ctx = make_context(
+            duration=295,
+            existing=TrackMetadata(
+                title="Zara Zara (Jhankar Beats)", artist="Bombay Jayashri"
+            ),
+        )
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.ItunesProvider().identify(ctx)
+
+        self.assertIn(f"{textsearch.ARTWORK_SIZE}x{textsearch.ARTWORK_SIZE}",
+                      result.cover_url)
+        self.assertNotIn("100x100", result.cover_url)
+
+    def test_a_row_without_artwork_reports_no_cover(self):
+        self.assertEqual(textsearch._itunes_artwork({}), "")
+
+    def test_an_unexpected_artwork_url_is_kept_rather_than_mangled(self):
+        url = "https://example.test/cover.jpg"
+        self.assertEqual(textsearch._itunes_artwork({"artworkUrl100": url}), url)
+
+    def test_deezer_prefers_the_larger_published_cover(self):
+        ctx = make_context(
+            duration=195,
+            existing=TrackMetadata(title="Just a Boy", artist="DrINsaNE"),
+        )
+        with self._respond(DEEZER_PAYLOAD):
+            result = textsearch.DeezerProvider().identify(ctx)
+
+        self.assertEqual(result.cover_url, "https://e-cdn.dzcdn.net/500.jpg")
+
+    # -- request shape --
+
+    def test_the_configured_storefront_reaches_the_url(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        with override_settings(ITUNES_COUNTRY="IN"), self._respond(
+            {"results": []}
+        ) as urlopen:
+            textsearch.ItunesProvider().identify(ctx)
+
+        self.assertIn("country=IN", urlopen.call_args.args[0].full_url)
+
+    def test_every_request_carries_the_configured_timeout(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        with self._respond({"results": []}) as urlopen:
+            textsearch.ItunesProvider().identify(ctx)
+
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 5.0)
+
+    # -- failure --
+
+    def test_no_rows_returns_none(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        with self._respond({"results": []}):
+            self.assertIsNone(textsearch.ItunesProvider().identify(ctx))
+
+    def test_a_network_failure_is_a_miss_not_a_raise(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("reset")):
+            self.assertIsNone(textsearch.ItunesProvider().identify(ctx))
+
+    def test_a_body_that_is_not_json_is_a_miss(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(b"<html>rate limited</html>"),
+        ):
+            self.assertIsNone(textsearch.ItunesProvider().identify(ctx))
+
+    def test_an_oversized_body_is_discarded(self):
+        ctx = make_context(existing=TrackMetadata(title="X", artist="Y"))
+        huge = b"x" * (textsearch.MAX_RESPONSE_BYTES + 10)
+        with mock.patch("urllib.request.urlopen", return_value=FakeHTTPResponse(huge)):
+            self.assertIsNone(textsearch.ItunesProvider().identify(ctx))
+
+    def test_a_disabled_provider_reports_why(self):
+        with override_settings(ITUNES_ENABLED=False):
+            reason = textsearch.ItunesProvider().unavailable_reason()
+            self.assertIn("ITUNES_ENABLED", reason)
+        with override_settings(DEEZER_ENABLED=False):
+            reason = textsearch.DeezerProvider().unavailable_reason()
+            self.assertIn("DEEZER_ENABLED", reason)
+
+    # -- seeding --
+
+    def test_a_seed_is_searched_before_the_files_own_text(self):
+        ctx = make_context(existing=TrackMetadata(title="Tane Joyi Me Jyaarthi"))
+        with self._respond({"results": []}) as urlopen:
+            textsearch.ItunesProvider().candidates(
+                ctx, seeds=["Lagyo Prityu No Rang Umesh Barot"]
+            )
+
+        first = urllib.parse.unquote_plus(urlopen.call_args_list[0].args[0].full_url)
+        self.assertIn("Lagyo Prityu No Rang", first)
+
+    def test_seeds_are_bounded(self):
+        ctx = make_context()
+        seeds = [f"seed {n}" for n in range(20)]
+        with self._respond({"results": []}) as urlopen:
+            textsearch.ItunesProvider().candidates(ctx, seeds=seeds)
+
+        ceiling = textsearch.MAX_SEED_QUERIES + len(textsearch.queries_for(ctx))
+        self.assertLessEqual(len(urlopen.call_args_list), ceiling)
+
+
+class CatalogueChainRegistrationTests(SimpleTestCase):
+    """Both providers are nameable in IDENTIFY_CHAIN."""
+
+    def test_both_are_known_providers(self):
+        classes = base._provider_classes()
+        self.assertIn("itunes", classes)
+        self.assertIn("deezer", classes)
+
+    @override_settings(
+        IDENTIFY_CHAIN=["itunes", "deezer"],
+        ITUNES_ENABLED=True,
+        DEEZER_ENABLED=True,
+    )
+    def test_they_build_into_the_chain_in_order(self):
+        base.reset_chain()
+        self.addCleanup(base.reset_chain)
+        self.assertEqual([p.name for p in base.get_chain()], ["itunes", "deezer"])
+
+
+class SuggestionSeedingTests(SimpleTestCase):
+    """The panel hands catalogue search what the audio providers already found."""
+
+    def test_seed_queries_are_title_and_artist_best_first(self):
+        found = [
+            TrackMetadata(title="Weak", artist="Nobody", confidence=0.2),
+            TrackMetadata(
+                title="Lagyo Prityu No Rang", artist="Umesh Barot", confidence=0.85
+            ),
+        ]
+        self.assertEqual(
+            suggest._seed_queries(found)[0], "Lagyo Prityu No Rang Umesh Barot"
+        )
+
+    def test_the_same_answer_from_two_providers_seeds_once(self):
+        found = [
+            TrackMetadata(
+                title="Same", artist="Artist", confidence=0.9, provider="shazam"
+            ),
+            TrackMetadata(
+                title="Same", artist="Artist", confidence=0.8, provider="tags"
+            ),
+        ]
+        self.assertEqual(len(suggest._seed_queries(found)), 1)
+
+    def test_an_answer_with_no_text_seeds_nothing(self):
+        self.assertEqual(suggest._seed_queries([TrackMetadata()]), [])
+
+    @override_settings(ITUNES_ENABLED=True)
+    def test_a_catalogue_provider_is_offered_even_when_the_chain_omits_it(self):
+        # The point of SUGGEST_STANDALONE: try it by hand before promoting it
+        # to automatic use.
+        self.assertIsNotNone(suggest._standalone("itunes"))
+
+    @override_settings(ITUNES_ENABLED=False)
+    def test_a_switched_off_provider_is_not_offered(self):
+        self.assertIsNone(suggest._standalone("itunes"))
+
+    def test_only_catalogue_providers_may_be_built_standalone(self):
+        self.assertIsNone(suggest._standalone("acoustid"))
+        self.assertIsNone(suggest._standalone("gemini"))
+
+
+@override_settings(
+    IDENTIFY_ENRICH=True,
+    ITUNES_ENABLED=True,
+    ITUNES_RATE_PER_MIN=6000.0,
+    ITUNES_COUNTRY="US",
+    DEEZER_ENABLED=True,
+    DEEZER_RATE_PER_MIN=6000.0,
+    PROVIDER_TIMEOUT_SECONDS=5.0,
+)
+class CatalogueEnrichmentTests(SimpleTestCase):
+    """Filling a bare answer's blanks from a catalogue. HTTP is mocked."""
+
+    def setUp(self):
+        textsearch.reset_for_tests()
+        self.addCleanup(textsearch.reset_for_tests)
+
+    def _respond(self, payload):
+        return mock.patch(
+            "urllib.request.urlopen", return_value=_json_response(payload)
+        )
+
+    def _shazam_answer(self):
+        # What Shazam actually returns: a name, and none of the rest.
+        return TrackMetadata(
+            title="Zara Zara (Jhankar Beats)",
+            artist="Bombay Jayashri, Harris Jayaraj & Sameer",
+            confidence=0.86,
+            provider="shazam",
+        )
+
+    def test_the_blanks_are_filled(self):
+        ctx = make_context(duration=295)
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.enrich(self._shazam_answer(), ctx)
+
+        self.assertEqual(result.album, "Zara Zara (Jhankar Beats) - Single")
+        self.assertEqual(result.track_no, 1)
+        self.assertEqual(result.disc_no, 1)
+        self.assertEqual(result.year, 2024)
+        self.assertTrue(result.cover_url)
+
+    def test_the_identifying_provider_and_score_are_preserved(self):
+        ctx = make_context(duration=295)
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.enrich(self._shazam_answer(), ctx)
+
+        # The dashboard credits whoever recognised the audio, not whoever
+        # supplied the album art.
+        self.assertEqual(result.provider, "shazam")
+        self.assertEqual(result.confidence, 0.86)
+
+    def test_the_title_and_artist_are_never_overwritten(self):
+        answer = replace(self._shazam_answer(), title="Zara Zara", artist="Somebody")
+        ctx = make_context(duration=295)
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.enrich(answer, ctx)
+
+        self.assertEqual(result.title, "Zara Zara")
+        self.assertEqual(result.artist, "Somebody")
+
+    def test_a_field_the_chain_already_set_survives(self):
+        answer = replace(self._shazam_answer(), album="The Album I Already Had")
+        ctx = make_context(duration=295)
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.enrich(answer, ctx)
+
+        self.assertEqual(result.album, "The Album I Already Had")
+
+    def test_a_loose_duration_match_is_not_trusted_to_enrich(self):
+        # 295s catalogue row against a 260s file: offered in the panel at a low
+        # score, but never merged in silently.
+        ctx = make_context(duration=260)
+        with self._respond(ITUNES_PAYLOAD):
+            result = textsearch.enrich(self._shazam_answer(), ctx)
+
+        self.assertEqual(result.album, "")
+        self.assertEqual(result.track_no, 0)
+
+    def test_an_answer_with_nothing_missing_makes_no_request(self):
+        complete = TrackMetadata(
+            title="T", artist="A", album="Al", album_artist="A", track_no=1,
+            disc_no=1, year=2020, genre="Pop", cover_url="http://x/y.jpg",
+            confidence=0.9, provider="shazam",
+        )
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            textsearch.enrich(complete, make_context(duration=295))
+
+        urlopen.assert_not_called()
+
+    def test_a_catalogue_answer_is_not_enriched_from_the_other_catalogue(self):
+        answer = TrackMetadata(
+            title="T", artist="A", confidence=0.9, provider="itunes"
+        )
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            textsearch.enrich(answer, make_context(duration=295))
+
+        urlopen.assert_not_called()
+
+    def test_an_unusable_answer_is_returned_untouched(self):
+        bare = TrackMetadata(confidence=0.9, provider="shazam")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            self.assertIs(textsearch.enrich(bare, make_context()), bare)
+
+        urlopen.assert_not_called()
+
+    @override_settings(IDENTIFY_ENRICH=False)
+    def test_the_setting_switches_it_off(self):
+        answer = self._shazam_answer()
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            self.assertIs(textsearch.enrich(answer, make_context(duration=295)), answer)
+
+        urlopen.assert_not_called()
+
+    def test_a_network_failure_leaves_the_answer_intact(self):
+        answer = self._shazam_answer()
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("reset")):
+            self.assertEqual(
+                textsearch.enrich(answer, make_context(duration=295)), answer
+            )
+
+    def test_the_chain_enriches_what_it_returns(self):
+        provider = make_provider(
+            "shazam",
+            result=TrackMetadata(
+                title="Zara Zara (Jhankar Beats)",
+                artist="Bombay Jayashri, Harris Jayaraj & Sameer",
+                confidence=0.86,
+            ),
+        )
+        registry = {"shazam": provider}
+        with mock.patch.object(base, "_provider_classes", return_value=registry), \
+                override_settings(IDENTIFY_CHAIN=["shazam"]), \
+                self._respond(ITUNES_PAYLOAD):
+            base.reset_chain()
+            self.addCleanup(base.reset_chain)
+            result = base.identify(make_context(duration=295))
+
+        self.assertEqual(result.track_no, 1)
+        self.assertEqual(result.provider, "shazam")
+
+    def test_a_raising_enrichment_cannot_lose_the_identification(self):
+        answer = TrackMetadata(title="T", artist="A", confidence=0.9, provider="shazam")
+        with mock.patch.object(
+            textsearch, "enrich", side_effect=RuntimeError("boom")
+        ):
+            self.assertIs(base._enriched(answer, make_context()), answer)
+
+
+@override_settings(ITUNES_ENABLED=True, DEEZER_ENABLED=True)
+class GeminiSeedTests(SimpleTestCase):
+    """Gemini proposes a spelling; only what a catalogue confirms is shown."""
+
+    def _gemini(self, result):
+        provider = mock.Mock()
+        provider.identify.return_value = result
+        return provider
+
+    def test_a_guess_becomes_a_query(self):
+        gemini = self._gemini(
+            TrackMetadata(title="Dhaal Bhaat Shaak Rotli", artist="Parle Patel")
+        )
+        seeds = suggest._ask_for_seeds({"gemini": gemini}, make_context(), [])
+        self.assertEqual(seeds, ["Dhaal Bhaat Shaak Rotli Parle Patel"])
+
+    def test_nothing_is_asked_when_the_audio_already_answered(self):
+        gemini = self._gemini(TrackMetadata(title="X", artist="Y"))
+        found = [TrackMetadata(title="Known", artist="Artist", confidence=0.9)]
+        self.assertEqual(
+            suggest._ask_for_seeds({"gemini": gemini}, make_context(), found), []
+        )
+        gemini.identify.assert_not_called()
+
+    def test_an_unusable_guess_seeds_nothing(self):
+        gemini = self._gemini(TrackMetadata(title="Only a title"))
+        self.assertEqual(
+            suggest._ask_for_seeds({"gemini": gemini}, make_context(), []), []
+        )
+
+    def test_a_raising_seed_provider_is_survivable(self):
+        gemini = mock.Mock()
+        gemini.identify.side_effect = RuntimeError("quota")
+        self.assertEqual(
+            suggest._ask_for_seeds({"gemini": gemini}, make_context(), []), []
+        )
+
+    def test_gemini_is_never_offered_as_a_candidate(self):
+        self.assertNotIn("gemini", suggest.SUGGEST_PROVIDERS)
+        self.assertIn("gemini", suggest.SUGGEST_SEED_ONLY)
+
+
+class SuggestionRankingTests(SimpleTestCase):
+    """Ordering the panel offers, and which row gets the highlighted button."""
+
+    def _hookah(self):
+        # The real case: same title, same artist, same scoring band, and the
+        # remix inserted first. The file is the 4:14 album cut.
+        return [
+            TrackMetadata(title="Hookah Bar (Remix)", artist="Himesh Reshammiya",
+                          track_no=9, duration=202, confidence=0.52,
+                          provider="itunes"),
+            TrackMetadata(title="Hookah Bar", artist="Himesh Reshammiya",
+                          track_no=5, duration=254, confidence=0.52,
+                          provider="itunes"),
+        ]
+
+    def test_the_closer_running_time_wins_a_tie(self):
+        ranked = suggest._rank(self._hookah(), 254)
+        self.assertEqual(ranked[0].title, "Hookah Bar")
+
+    def test_without_a_file_duration_the_order_is_left_alone(self):
+        ranked = suggest._rank(self._hookah(), 0)
+        self.assertEqual(ranked[0].title, "Hookah Bar (Remix)")
+
+    def test_confidence_still_outranks_running_time(self):
+        candidates = [
+            TrackMetadata(title="Close but unsure", artist="A", track_no=1,
+                          duration=195, confidence=0.40, provider="itunes"),
+            TrackMetadata(title="Further but sure", artist="A", track_no=1,
+                          duration=210, confidence=0.90, provider="itunes"),
+        ]
+        self.assertEqual(suggest._rank(candidates, 195)[0].title, "Further but sure")
+
+    def test_a_track_number_still_outranks_everything(self):
+        candidates = [
+            TrackMetadata(title="No track number", artist="A", duration=195,
+                          confidence=0.90, provider="shazam"),
+            TrackMetadata(title="Has one", artist="A", track_no=3, duration=260,
+                          confidence=0.52, provider="itunes"),
+        ]
+        self.assertEqual(suggest._rank(candidates, 195)[0].title, "Has one")
+
+    def test_a_candidate_with_no_duration_does_not_pose_as_a_match(self):
+        candidates = [
+            TrackMetadata(title="Unknown length", artist="A", track_no=1,
+                          confidence=0.52, provider="shazam"),
+            TrackMetadata(title="Exactly right", artist="A", track_no=1,
+                          duration=195, confidence=0.52, provider="itunes"),
+        ]
+        self.assertEqual(suggest._rank(candidates, 195)[0].title, "Exactly right")
+
+
+class CatalogueConcurrencyTests(SimpleTestCase):
+    """Stage two runs the catalogues together without becoming unpredictable."""
+
+    def _catalogue(self, name, rows, delay=0.0, error=None):
+        """A stand-in catalogue provider that records when it was called."""
+        provider = mock.Mock()
+        provider.name = name
+
+        def candidates(ctx, seeds=None):
+            provider.seen_seeds = list(seeds or [])
+            provider.started = time.monotonic()
+            if delay:
+                time.sleep(delay)
+            provider.finished = time.monotonic()
+            if error is not None:
+                raise error
+            return rows
+
+        provider.candidates.side_effect = candidates
+        return provider
+
+    def test_both_catalogues_run_at_once(self):
+        slow = self._catalogue("itunes", [], delay=0.30)
+        also_slow = self._catalogue("deezer", [], delay=0.30)
+
+        start = time.monotonic()
+        suggest._from_catalogues(
+            {"itunes": slow, "deezer": also_slow}, make_context(), []
+        )
+        elapsed = time.monotonic() - start
+
+        # Sequentially this is 0.60s. Generous ceiling so a loaded CI box does
+        # not fail it, but far below the sequential cost.
+        self.assertLess(elapsed, 0.50)
+
+    def test_the_order_shown_does_not_depend_on_which_finished_first(self):
+        # Deezer returns immediately, iTunes dawdles. iTunes must still lead,
+        # because SUGGEST_PROVIDERS says so.
+        slow = self._catalogue(
+            "itunes",
+            [TrackMetadata(title="From iTunes", artist="A", provider="itunes")],
+            delay=0.20,
+        )
+        fast = self._catalogue(
+            "deezer",
+            [TrackMetadata(title="From Deezer", artist="A", provider="deezer")],
+        )
+
+        rows = suggest._from_catalogues(
+            {"itunes": slow, "deezer": fast}, make_context(), []
+        )
+
+        self.assertEqual([r.provider for r in rows], ["itunes", "deezer"])
+
+    def test_one_catalogue_failing_does_not_cost_the_other(self):
+        broken = self._catalogue("itunes", [], error=RuntimeError("503"))
+        working = self._catalogue(
+            "deezer",
+            [TrackMetadata(title="Survived", artist="A", provider="deezer")],
+        )
+
+        rows = suggest._from_catalogues(
+            {"itunes": broken, "deezer": working}, make_context(), []
+        )
+
+        self.assertEqual([r.title for r in rows], ["Survived"])
+
+    def test_both_are_given_the_same_seeds(self):
+        # Not "whatever the other one had found by then": under concurrency
+        # that would differ between runs of the same search.
+        first = self._catalogue("itunes", [])
+        second = self._catalogue("deezer", [])
+        seeds = ["Lagyo Prityu No Rang Umesh Barot"]
+
+        suggest._from_catalogues(
+            {"itunes": first, "deezer": second}, make_context(), seeds
+        )
+
+        self.assertEqual(first.seen_seeds, seeds)
+        self.assertEqual(second.seen_seeds, seeds)
+
+    def test_a_single_catalogue_needs_no_pool(self):
+        only = self._catalogue(
+            "itunes", [TrackMetadata(title="Alone", artist="A", provider="itunes")]
+        )
+        with mock.patch.object(suggest.futures, "ThreadPoolExecutor") as pool:
+            rows = suggest._from_catalogues({"itunes": only}, make_context(), [])
+
+        pool.assert_not_called()
+        self.assertEqual([r.title for r in rows], ["Alone"])
+
+    @override_settings(ITUNES_ENABLED=False, DEEZER_ENABLED=False)
+    def test_no_catalogues_available_is_not_an_error(self):
+        self.assertEqual(suggest._from_catalogues({}, make_context(), []), [])
+
+    def test_no_worker_threads_outlive_the_search(self):
+        # The pool is a context manager, so nothing may still be running when
+        # collect returns — this app keeps no background threads.
+        before = {t.name for t in threading.enumerate()}
+        suggest._from_catalogues(
+            {"itunes": self._catalogue("itunes", []),
+             "deezer": self._catalogue("deezer", [])},
+            make_context(),
+            [],
+        )
+        after = {t.name for t in threading.enumerate()}
+        self.assertEqual({n for n in after - before if n.startswith("suggest")}, set())
