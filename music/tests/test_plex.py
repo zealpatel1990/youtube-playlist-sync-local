@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 from django.test import SimpleTestCase
 
+from music import plex
+
 from music.plex import (
     SINGLES_ALBUM,
     UNKNOWN_ALBUM,
@@ -524,3 +526,213 @@ class IsAlreadyOrganizedTests(SimpleTestCase):
                     is_already_organized(target, self.root, naming),
                     f"{target} was not recognised as organized",
                 )
+
+
+class AlbumNormalizationTests(SimpleTestCase):
+    """Folding the spellings of one album into one string.
+
+    Every case here comes from the live library, where 11 albums had been split
+    into 25 folders by nothing but a suffix.
+    """
+
+    def test_the_soundtrack_suffix_is_removed(self):
+        self.assertEqual(
+            plex.normalize_album("Rang De Basanti (Original Motion Picture Soundtrack)"),
+            "Rang De Basanti",
+        )
+
+    def test_the_bracketed_and_odd_spaced_forms_are_removed(self):
+        for written in (
+            "Guru [Original Motion Picture Soundtrack]",
+            "Guru  (Original  Motion  Picture  Soundtrack)  ",
+            "Guru (ORIGINAL MOTION PICTURE SOUNDTRACK)",
+        ):
+            with self.subTest(written=written):
+                self.assertEqual(plex.normalize_album(written), "Guru")
+
+    def test_only_that_one_phrase_is_removed(self):
+        # Deliberately narrow: widen only against a measured collision. Each of
+        # these was in an earlier, looser version of the rule and is now kept.
+        for kept in (
+            "Guru (Soundtrack)",
+            "Guru (OST)",
+            "Guru (Original Score)",
+            "Guru (Motion Picture Soundtrack)",
+            "Guru (Original Soundtrack)",
+            "JUST A BOY - Single",
+            "Ghoomer - EP",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(plex.normalize_album(kept), kept)
+
+    def test_the_suffix_is_only_removed_from_the_end(self):
+        title = "Original Motion Picture Soundtrack Collection"
+        self.assertEqual(plex.normalize_album(title), title)
+
+    def test_a_suffix_that_names_the_recording_is_kept(self):
+        # These are different recordings with different running times, and
+        # `textsearch` works hard to tell them apart. Folding them would undo
+        # that.
+        for kept in (
+            "Zara Zara (Jhankar Beats)",
+            "Lagyo Re Prityu No Rang (Slowed + Reverb)",
+            "Aashiqui Mein Teri (Akbar Sami Remix)",
+            "Hookah Bar (Remix)",
+            # "Score" unqualified is a real album name (The Fugees' The Score),
+            # so only "Original Score" / "Motion Picture Score" count.
+            "The Score",
+            "Bandit (Score)",
+            "Pushpa (Deluxe Edition)",
+            "Rockstar (Live)",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(plex.normalize_album(kept), kept)
+
+    def test_a_title_that_is_only_the_suffix_survives(self):
+        # Normalising this to "" would file the track under Unknown Album.
+        only = "(Original Motion Picture Soundtrack)"
+        self.assertEqual(plex.normalize_album(only), only)
+
+    def test_nothing_in_means_nothing_out(self):
+        self.assertEqual(plex.normalize_album(""), "")
+        self.assertEqual(plex.normalize_album("   "), "")
+
+    def test_the_two_rang_de_basanti_spellings_become_one(self):
+        a = plex.normalize_album("Rang De Basanti")
+        b = plex.normalize_album("Rang De Basanti (Original Motion Picture Soundtrack)")
+        self.assertEqual(a, b)
+
+
+class PrincipalArtistTests(SimpleTestCase):
+    """Taking the album's artist out of a per-track performer list."""
+
+    def test_a_comma_list_yields_the_first_credit(self):
+        self.assertEqual(
+            plex.principal_artist("A.R. Rahman, Shreya Ghoshal & Uday Mazumdar"),
+            "A.R. Rahman",
+        )
+        self.assertEqual(
+            plex.principal_artist("Pritam, Arijit Singh & Sunidhi Chauhan"), "Pritam"
+        )
+
+    def test_a_hyphenated_group_is_never_split(self):
+        # Truncating either of these would invent an artist who never existed.
+        for band in ("Shankar-Ehsaan-Loy", "Salim-Sulaiman"):
+            with self.subTest(band=band):
+                self.assertEqual(plex.principal_artist(band), band)
+
+    def test_an_ampersand_pair_is_never_split(self):
+        # A duo can legitimately be an album artist, so `&` alone is not a list.
+        for duo in ("Asha Bhosle & Adnan Sami", "Mohd. Rafi & Suman Kalyanpur"):
+            with self.subTest(duo=duo):
+                self.assertEqual(plex.principal_artist(duo), duo)
+
+    def test_a_single_name_is_untouched(self):
+        self.assertEqual(plex.principal_artist("A.R. Rahman"), "A.R. Rahman")
+
+    def test_nothing_in_means_nothing_out(self):
+        self.assertEqual(plex.principal_artist(""), "")
+
+
+class NamingPolicyIntegrationTests(SimpleTestCase):
+    """The two rules as they reach an actual path."""
+
+    def test_a_performer_list_no_longer_becomes_a_folder(self):
+        naming = plex.TrackNaming(
+            title="Tu Bin Bataye",
+            artist="A.R. Rahman, Madhushree & Naresh Iyer",
+            album="Rang De Basanti (Original Motion Picture Soundtrack)",
+            track_no=4,
+        )
+        self.assertEqual(
+            plex.build_relative_path(naming),
+            Path("A.R. Rahman") / "Rang De Basanti" / "04 - Tu Bin Bataye.mp3",
+        )
+
+    def test_an_explicit_album_artist_is_also_reduced_to_its_principal(self):
+        # The real Lagaan case: the line-up was written into album_artist, not
+        # just inherited from the track's artist tag.
+        naming = plex.TrackNaming(
+            title="O Rey Chhori",
+            album_artist="A.R. Rahman, Alka Yagnik, Udit Narayan & Vasundhara Das",
+        )
+        self.assertEqual(plex.resolve_album_artist(naming), "A.R. Rahman")
+
+    def test_a_group_name_in_album_artist_is_still_never_split(self):
+        naming = plex.TrackNaming(
+            title="X", artist="Someone, Else", album_artist="Shankar-Ehsaan-Loy"
+        )
+        self.assertEqual(plex.resolve_album_artist(naming), "Shankar-Ehsaan-Loy")
+
+    def test_a_compilation_still_goes_to_various_artists(self):
+        naming = plex.TrackNaming(
+            title="X", artist="A, B", album="Y", is_compilation=True
+        )
+        self.assertEqual(plex.resolve_album_artist(naming), plex.VARIOUS_ARTISTS)
+
+    def test_the_four_rang_de_basanti_albums_land_in_one_place(self):
+        # The real tags from the Pi, minus the MusicBrainz ids.
+        tracks = [
+            ("Khoon Chala", "Mohit Chauhan", "Rang De Basanti", "A.R. Rahman", 6),
+            ("Luka Chuppi", "Lata Mangeshkar & A. R. Rahman", "Rang De Basanti",
+             "A.R. Rahman", 8),
+            ("Rang De Basanti", "A.R. Rahman, Daler Mehndi & K.S. Chithra",
+             "Rang De Basanti (Original Motion Picture Soundtrack)", "A.R. Rahman", 2),
+            ("Tu Bin Bataye", "A.R. Rahman, Madhushree & Naresh Iyer",
+             "Rang De Basanti (Original Motion Picture Soundtrack)", "A.R. Rahman", 4),
+        ]
+        folders = {
+            plex.build_relative_path(
+                plex.TrackNaming(title=t, artist=a, album=al, album_artist=aa,
+                                 track_no=n)
+            ).parent
+            for t, a, al, aa, n in tracks
+        }
+        self.assertEqual(folders, {Path("A.R. Rahman") / "Rang De Basanti"})
+
+
+class CanonicalArtistTests(SimpleTestCase):
+    """The curated alias table, and how it composes with list-reduction."""
+
+    def test_punctuation_variants_resolve_through_one_entry(self):
+        for written in ("A. R. Rahman", "A.R. Rahman", "A R Rahman", "a.r. rahman"):
+            with self.subTest(written=written):
+                self.assertEqual(plex.canonical_artist(written), "A.R. Rahman")
+
+    def test_a_composer_and_lyricist_pair_files_under_the_composer(self):
+        self.assertEqual(plex.canonical_artist("A.R. Rahman & Gulzar"), "A.R. Rahman")
+        self.assertEqual(plex.canonical_artist("Pritam & Irshad Kamil"), "Pritam")
+
+    def test_a_duo_not_in_the_table_is_left_alone(self):
+        # The rule that makes the table safe: nothing collapses unless listed.
+        for duo in ("Asha Bhosle & Adnan Sami", "Mohd. Rafi & Suman Kalyanpur",
+                    "Salim-Sulaiman"):
+            with self.subTest(duo=duo):
+                self.assertEqual(plex.canonical_artist(duo), duo)
+
+    def test_list_reduction_runs_before_the_alias_lookup(self):
+        self.assertEqual(
+            plex.canonical_artist("A. R. Rahman, Alka Yagnik & Udit Narayan"),
+            "A.R. Rahman",
+        )
+
+    def test_the_three_dash_characters_become_one_name(self):
+        for dash in ("-", "‐", "–"):
+            with self.subTest(dash=dash):
+                self.assertEqual(
+                    plex.canonical_artist(f"Shankar{dash}Ehsaan{dash}Loy"),
+                    "Shankar-Ehsaan-Loy",
+                )
+
+    def test_an_unknown_credit_is_returned_unchanged(self):
+        self.assertEqual(plex.canonical_artist("Some New Artist"), "Some New Artist")
+
+    def test_nothing_in_means_nothing_out(self):
+        self.assertEqual(plex.canonical_artist(""), "")
+
+    def test_every_alias_target_is_itself_stable(self):
+        # A target that would itself be rewritten means the table disagrees
+        # with itself and the result depends on how many times it is applied.
+        for target in plex.ARTIST_ALIASES.values():
+            with self.subTest(target=target):
+                self.assertEqual(plex.canonical_artist(target), target)

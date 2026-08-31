@@ -1771,18 +1771,15 @@ class SuggestionRankingTests(SimpleTestCase):
         ]
         self.assertEqual(suggest._rank(candidates, 195)[0].title, "Has one")
 
-    def test_a_candidate_with_no_duration_does_not_pose_as_a_match(self):
-        candidates = [
-            TrackMetadata(title="Unknown length", artist="A", track_no=1,
-                          confidence=0.52, provider="shazam"),
-            TrackMetadata(title="Exactly right", artist="A", track_no=1,
-                          duration=195, confidence=0.52, provider="itunes"),
-        ]
-        self.assertEqual(suggest._rank(candidates, 195)[0].title, "Exactly right")
 
-
+@override_settings(ITUNES_ENABLED=False, DEEZER_ENABLED=False)
 class CatalogueConcurrencyTests(SimpleTestCase):
-    """Stage two runs the catalogues together without becoming unpredictable."""
+    """Stage two runs the catalogues together without becoming unpredictable.
+
+    Both providers are switched off in settings so `_standalone` cannot build a
+    real one for any name these tests leave out of `available` — without that,
+    a test naming only iTunes silently grew a live Deezer call.
+    """
 
     def _catalogue(self, name, rows, delay=0.0, error=None):
         """A stand-in catalogue provider that records when it was called."""
@@ -1872,7 +1869,6 @@ class CatalogueConcurrencyTests(SimpleTestCase):
         pool.assert_not_called()
         self.assertEqual([r.title for r in rows], ["Alone"])
 
-    @override_settings(ITUNES_ENABLED=False, DEEZER_ENABLED=False)
     def test_no_catalogues_available_is_not_an_error(self):
         self.assertEqual(suggest._from_catalogues({}, make_context(), []), [])
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from django.conf import settings
 
+from music import plex
 from music.core import events
 from music.core.locks import track_locks
 from music.models import Track, TrackState
@@ -124,11 +125,21 @@ def identify_track(job_obj) -> str:
 
 
 def _apply_metadata(track: Track, meta) -> None:
-    """Copy provider output onto the Track without clobbering better local data."""
+    """Copy provider output onto the Track without clobbering better local data.
+
+    Album and album artist are normalised here rather than only in `plex`,
+    because the folder is not what Plex groups on — the embedded tag is, and
+    `library.tagio` writes these fields straight out. Normalising only the path
+    would move two spellings of one album into a single folder and leave Plex
+    still showing two albums inside it.
+    """
     track.title = meta.title or track.title
     track.artist = meta.artist or track.artist
-    track.album = meta.album or track.album
-    track.album_artist = meta.album_artist or track.album_artist
+    track.album = plex.normalize_album(meta.album or track.album)
+    album_artist = meta.album_artist or track.album_artist
+    # A provider that names only a per-track line-up ("A.R. Rahman, Shreya
+    # Ghoshal & Uday Mazumdar") would otherwise become its own album artist.
+    track.album_artist = plex.canonical_artist(album_artist) if album_artist else ""
     track.track_no = meta.track_no or track.track_no
     track.disc_no = meta.disc_no or track.disc_no
     track.year = meta.year or track.year

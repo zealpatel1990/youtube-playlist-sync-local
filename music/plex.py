@@ -14,6 +14,7 @@ filename convention is the secondary signal here, not the authority.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,20 +44,144 @@ class TrackNaming:
     fallback_stem: str = ""
 
 
+#: The one trailing parenthetical that names the *kind* of release rather than
+#: distinguishing one recording from another. Removed so both spellings of an
+#: album become one string.
+#:
+#: Deliberately the narrowest rule that fixes the observed problem. Wider
+#: versions were tried and rejected: a bare `(Score)` matches *The Score*, and
+#: `(Soundtrack)`, `(OST)` and `(Original Score)` buy nothing here — every one
+#: of the 11 albums this library had split into 25 folders was split by this
+#: exact string. Anything that only *narrows* which recording is meant —
+#: `(Jhankar Beats)`, `(Slowed + Reverb)`, `(Remix)`, `(Live)` — must never
+#: match, because those are different recordings with different running times.
+#:
+#: Widen this only against a measured collision, one phrase at a time.
+_RELEASE_KIND = re.compile(
+    r"\s*[\(\[]\s*original\s+motion\s+picture\s+soundtrack\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_album(album: str) -> str:
+    """An album title with the release-kind suffix removed.
+
+    `Rang De Basanti (Original Motion Picture Soundtrack)` and
+    `Rang De Basanti` are one album; Plex groups on the string, so they have to
+    become one string.
+    """
+    cleaned = (album or "").strip()
+    if not cleaned:
+        return ""
+    stripped = _RELEASE_KIND.sub("", cleaned).strip()
+    # Never normalise a title out of existence: a title that is nothing but the
+    # suffix is still all the name there is.
+    return stripped or cleaned
+
+
+#: Only a comma starts a list of performers. Deliberately not `&` or a dash:
+#: `Salim-Sulaiman`, `Shankar-Ehsaan-Loy`, `Asha Bhosle & Adnan Sami` and
+#: `Mohd. Rafi & Suman Kalyanpur` are all one credit, and truncating any of
+#: them would invent an artist who never existed. A comma is the separator the
+#: tag writers actually use for a list, and in every case measured on this
+#: library the composer is credited first:
+#:
+#:   "A.R. Rahman, Shreya Ghoshal & Uday Mazumdar" -> A.R. Rahman
+#:   "Pritam, Arijit Singh & Sunidhi Chauhan"      -> Pritam
+_CREDIT_LIST = re.compile(r"\s*,\s*")
+
+
+def principal_artist(credit: str) -> str:
+    """The first name in a performer credit, which is the one an album is filed under.
+
+    47 of 331 artist folders on the live library were whole per-track performer
+    lists, because a track carrying no album artist fell back to its own
+    `artist` tag verbatim. Every one of those was one album fragmented into a
+    folder per singer line-up.
+    """
+    cleaned = (credit or "").strip()
+    if not cleaned:
+        return ""
+    return _CREDIT_LIST.split(cleaned, 1)[0].strip() or cleaned
+
+
+#: Artist credits that mean an artist already in the library under another name.
+#:
+#: Curated on purpose. Automatic folding was considered and rejected: nothing
+#: mechanical separates `A.R. Rahman & Gulzar` (a composer and his lyricist,
+#: one album) from `Asha Bhosle & Adnan Sami` (a duet, genuinely two names), so
+#: the ones that collapse are listed by hand and everything else is left alone.
+#:
+#: **Keys are matched with punctuation, spacing and case folded away**, so one
+#: entry covers every spelling of a name — `A. R. Rahman`, `A.R. Rahman` and
+#: `A R Rahman` all resolve through the single `A.R. Rahman` key. Add a second
+#: entry only when the *words* differ.
+#:
+#: Every entry below is a collision measured on the live library.
+ARTIST_ALIASES: dict[str, str] = {
+    # Spelling only — same words, different punctuation.
+    "A.R. Rahman": "A.R. Rahman",
+    "K K": "KK",
+    # Three different dash characters were in use: ASCII, U+2010 and en dash.
+    "Shankar-Ehsaan-Loy": "Shankar-Ehsaan-Loy",
+    # Composer & lyricist credited as a pair, filed under the composer.
+    "A.R. Rahman & Gulzar": "A.R. Rahman",
+    "A.R. Rahman & Irshad Kamil": "A.R. Rahman",
+    "Pritam & Irshad Kamil": "Pritam",
+    "Pritam & Amitabh Bhattacharya": "Pritam",
+    "Vishal Bhardwaj & Rahat Fateh Ali Khan": "Vishal Bhardwaj",
+    "Vishal Bhardwaj & Shreya Ghoshal": "Vishal Bhardwaj",
+    "S.D. Burman & Shailendra": "S.D. Burman",
+}
+
+_ALIAS_FOLD = re.compile(r"[^a-z0-9]+")
+
+
+def _fold(name: str) -> str:
+    """A comparison key with case, spacing and punctuation removed."""
+    return _ALIAS_FOLD.sub("", (name or "").lower())
+
+
+#: Built once. A dict keyed on the folded form is what lets one entry cover
+#: every punctuation variant of the same name.
+_ALIASES_FOLDED: dict[str, str] = {_fold(k): v for k, v in ARTIST_ALIASES.items()}
+
+
+def canonical_artist(credit: str) -> str:
+    """One artist name for a credit, after list-reduction and aliasing.
+
+    The two rules compose: `A.R. Rahman, Shreya Ghoshal & Uday Mazumdar` loses
+    its line-up to `principal_artist`, and `A. R. Rahman` then resolves to
+    `A.R. Rahman` through the alias table. A credit in neither is returned
+    unchanged — this never invents a name it was not told about.
+    """
+    reduced = principal_artist(credit)
+    if not reduced:
+        return ""
+    return _ALIASES_FOLDED.get(_fold(reduced), reduced)
+
+
 def resolve_album_artist(naming: TrackNaming) -> str:
     """The artist folder name. Compilations go to `Various Artists`; the
-    per-track `artist` tag still carries the real performer."""
+    per-track `artist` tag still carries the real performer.
+
+    `principal_artist` applies to the album artist tag as well as to the
+    fallback, because a tagger writing a line-up into that field is exactly the
+    case this exists for. Measured: Lagaan sat in three folders, one of them
+    literally named `A.R. Rahman, Alka Yagnik, Udit Narayan & Vasundhara Das`,
+    and treating an explicit tag as authoritative left it there.
+    """
     if naming.is_compilation:
         return VARIOUS_ARTISTS
     for candidate in (naming.album_artist, naming.artist):
         if candidate and candidate.strip():
-            return candidate.strip()
+            return canonical_artist(candidate)
     return UNKNOWN_ARTIST
 
 
 def resolve_album(naming: TrackNaming) -> str:
     if naming.album and naming.album.strip():
-        return naming.album.strip()
+        return normalize_album(naming.album)
     return SINGLES_ALBUM if (naming.title or naming.fallback_stem) else UNKNOWN_ALBUM
 
 
